@@ -50,6 +50,31 @@ void *solder_get_text_addr(void *handle);
 /* replace code at `symname` with branch to another function at `dstaddr` */
 int solder_hook_function(void *__restrict handle, const char *__restrict symname, void *dstaddr);
 
+#ifdef SOLDER_LIBDL_COMPAT
+
+/* provide "compatibility layer" with libdl */
+
+#undef dlopen
+#undef dlclose
+#undef dlsym
+#undef dlerror
+#undef RTLD_LOCAL
+#undef RTLD_GLOBAL
+#undef RTLD_NOW
+#undef RTLD_LAZY
+
+#define dlopen(x, y) solder_dlopen((x), (y))
+#define dlclose(x)   solder_dlclose((x))
+#define dlsym(x, y)  solder_dlsym((x), (y))
+#define dlerror()    solder_dlerror()
+
+#define RTLD_LOCAL   SOLDER_LOCAL
+#define RTLD_GLOBAL  SOLDER_GLOBAL
+#define RTLD_NOW     SOLDER_NOW
+#define RTLD_LAZY    SOLDER_LAZY
+
+#endif
+
 #ifdef __cplusplus
 }
 #endif
