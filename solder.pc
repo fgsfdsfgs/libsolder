@@ -1,0 +1,12 @@
+prefix=/opt/devkitpro/portlibs/switch
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: libsolder
+Description: Half-assed runtime dynamic loader for libnx
+Requires: 
+Version: 
+Libs: -L${libdir} -lsolder 
+Libs.private:
+Cflags: -I${includedir} 

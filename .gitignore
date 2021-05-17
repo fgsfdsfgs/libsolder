@@ -1,0 +1,5 @@
+.vscode
+debug
+release
+lib
+*.bz2
