@@ -3,13 +3,12 @@
 #include <string.h>
 #include <switch.h>
 #include <math.h>
-#define SOLDER_LIBDL_COMPAT
 #include <solder.h>
 
 static PadState pad;
 
 void wait_for_button(void) {
-  printf("press PLUS to continue\n");
+  printf("\npress PLUS to continue\n\n");
   while (appletMainLoop()) {
     padUpdate(&pad);
     u64 kDown = padGetButtonsDown(&pad);
@@ -27,6 +26,7 @@ int main(int argc, char* argv[]) {
   int (*fn_test)(float x) = NULL;
   void *cpplib = NULL;
   int (*fn_test_cpp)(int i, float x) = NULL;
+  int (*fn_puts)(const char *) = NULL;
 
   // init console afterwards in case it allocs
   consoleInit(NULL);
@@ -81,6 +81,16 @@ int main(int argc, char* argv[]) {
   printf("running test_cpp with bad arguments\n");
   rc = fn_test_cpp(69, 0.f);
   printf("test_cpp() returned %d\n", rc);
+
+  wait_for_button();
+
+  printf("trying to `dlsym` the main module\n");
+  fn_puts = (int (*)(const char *))solder_dlsym(NULL, "puts");
+  if (!fn_puts) {
+    printf("could not find `puts` in main module: %s\n", solder_dlerror());
+    goto _exit;
+  }
+  fn_puts("I AM PUTS\n");
 
   wait_for_button();
 

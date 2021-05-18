@@ -24,6 +24,9 @@ typedef struct solder_export {
 #define SOLDER_EXPORT_SYMBOL(sym) { #sym, (void *)&sym }
 #define SOLDER_EXPORT(name, addr) { name, addr }
 
+/* special handle meaning "this module" */
+#define SOLDER_DEFAULT (NULL)
+
 /* default export table in case you need it when using SOLDER_NO_NRO_EXPORTS */
 extern const int solder_num_default_exports;
 extern const solder_export_t solder_default_exports[];
@@ -68,6 +71,7 @@ int solder_hook_function(void *__restrict handle, const char *__restrict symname
 #undef RTLD_GLOBAL
 #undef RTLD_NOW
 #undef RTLD_LAZY
+#undef RTLD_DEFAULT
 
 #define dlopen(x, y) solder_dlopen((x), (y))
 #define dlclose(x)   solder_dlclose((x))
@@ -78,6 +82,7 @@ int solder_hook_function(void *__restrict handle, const char *__restrict symname
 #define RTLD_GLOBAL  SOLDER_GLOBAL
 #define RTLD_NOW     SOLDER_NOW
 #define RTLD_LAZY    SOLDER_LAZY
+#define RTLD_DEFAULT SOLDER_DEFAULT
 
 #endif
 
