@@ -3,16 +3,8 @@
 #include <string.h>
 #include <switch.h>
 #include <math.h>
+#define SOLDER_LIBDL_COMPAT
 #include <solder.h>
-
-/* extra exports */
-
-static const solder_export_t extra_exports[] = {
-  // needed by testlib
-  SOLDER_EXPORT_SYMBOL(sqrtf),
-};
-
-static const int num_extra_exports = sizeof(extra_exports) / sizeof(*extra_exports);
 
 static PadState pad;
 
@@ -29,7 +21,7 @@ void wait_for_button(void) {
 
 int main(int argc, char* argv[]) {
   // init solder as early as possible
-  int rc = solder_init(8 * 1024 * 1024, SOLDER_INIT_EXPORTS);
+  int rc = solder_init(8 * 1024 * 1024, 0);
 
   void *clib = NULL;
   int (*fn_test)(float x) = NULL;
@@ -45,9 +37,6 @@ int main(int argc, char* argv[]) {
     printf("solder error %d: %s\n", rc, solder_dlerror());
     goto _exit;
   }
-
-  // add our extra exports
-  solder_add_main_exports(extra_exports, num_extra_exports);
 
   printf("opening testlib.so\n");
   clib = solder_dlopen("testlib.so", SOLDER_GLOBAL);

@@ -25,12 +25,14 @@ INCLUDES	:=	include
 #---------------------------------------------------------------------------------
 ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE -fPIC
 
-CFLAGS	:=	-g3 -Wall -Og -ffunction-sections \
+CFLAGS	:=	-g -Wall -O2 -ffunction-sections \
 			$(ARCH) $(DEFINES)
 
 CFLAGS	+=	$(INCLUDE) -D__SWITCH__
 
-# exceptions in libraries are not supported yet (I think `catch` unwinds into the void?)
+# exceptions in libraries are not supported yet
+# `catch` appears to unwind into the void, regardless of what's imported into the lib or
+# linked to it
 CXXFLAGS	:= $(CFLAGS) -fno-exceptions -fno-rtti
 
 ASFLAGS	:=	-g $(ARCH)

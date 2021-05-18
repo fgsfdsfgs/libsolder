@@ -5,7 +5,8 @@ extern "C" {
 #endif
 
 enum solder_init_flags {
-  SOLDER_INIT_EXPORTS = 1, /* populate main exports table with some internal exports */
+  SOLDER_INITIALIZED = 1,    /* library is operational */
+  SOLDER_NO_NRO_EXPORTS = 2, /* don't autoexport NRO symbols */
 };
 
 enum solder_dlopen_flags {
@@ -18,17 +19,22 @@ enum solder_dlopen_flags {
 typedef struct solder_export {
   const char *name;  /* symbol name */
   void *addr_rx;     /* executable address */
-  void *addr_rw;     /* writable address (you don't need to fill this in) */
 } solder_export_t;
 
 #define SOLDER_EXPORT_SYMBOL(sym) { #sym, (void *)&sym }
 #define SOLDER_EXPORT(name, addr) { name, addr }
+
+/* default export table in case you need it when using SOLDER_NO_NRO_EXPORTS */
+extern const int solder_num_default_exports;
+extern const solder_export_t solder_default_exports[];
 
 /* initialize loader, allocating `heapsize` bytes for dynamic libs
    if heapsize is <= 0, sets the internal default of 32MB */
 int solder_init(const int heapsize, const int flags);
 /* deinit loader and free all libraries and library heap */
 void solder_quit(void);
+/* returns the `flags` value with which library was initialized, or 0 if it wasn't */
+int solder_init_flags(void);
 
 /* these function mostly the same as the equivalent dlfcn stuff */
 
@@ -38,8 +44,8 @@ void *solder_dlsym(void *__restrict handle, const char *__restrict symname);
 /* return current error and reset the error flag */
 const char *solder_dlerror(void);
 
-/* append exports to the main module's export list; addr_rw doesn't need to be set */
-void solder_add_main_exports(const solder_export_t *exp, const int numexp);
+/* set main module's dynsym list; if exp is NULL tries to get dynsyms from NRO */
+int solder_set_main_exports(const solder_export_t *exp, const int numexp);
 
 /* these only work on modules that haven't been finalized, so use LAZY */
 

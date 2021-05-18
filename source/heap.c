@@ -232,12 +232,6 @@ size_t so_heap_init(int sosize) {
   so_heap_base = (void *)ALIGN_MEM((uintptr_t)so_heap_base, ALIGN_PAGE); // align to page size
   so_heap_limit = (char *)fake_heap_start + size - (char *)so_heap_base;
 
-	printf("fheap start = %p\n", fake_heap_start);
-	printf("fheap end   = %p (was %p)\n", fake_heap_end, old_heap_end);
-	printf("fheap size  = %lu\n", fake_heap_size);
-	printf("sheap base  = %p\n", so_heap_base);
-	printf("sheap size  = %lu\n", so_heap_limit);
-
   // initialize our heap
   heap_init();
   heap_extend(so_heap_base, so_heap_limit);

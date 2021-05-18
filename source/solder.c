@@ -7,10 +7,10 @@
 #include "exports.h"
 #include "solder.h"
 
-static int initialized = 0;
+static int init_flags = 0;
 
 int solder_init(const int heapsize, const int flags) {
-  if (initialized) {
+  if (init_flags) {
     set_error("libsolder is already initialized");
     return -2;
   }
@@ -18,19 +18,23 @@ int solder_init(const int heapsize, const int flags) {
   const size_t hsize = so_heap_init(heapsize);
   if (hsize == 0) return -1;
 
-  initialized = 1;
+  init_flags = SOLDER_INITIALIZED | flags;
 
-  // add default exports to main if needed
-  if (flags & SOLDER_INIT_EXPORTS)
-    solder_add_main_exports(solder_default_exports, solder_num_default_exports);
+  // unless explicitly requested otherwise, try getting symbols from NRO
+  if (!(flags & SOLDER_NO_NRO_EXPORTS))
+    solder_set_main_exports(NULL, 0);
 
   solder_dlerror(); // clear error flag
 
   return 0;
 }
 
+int solder_init_flags(void) {
+  return init_flags;
+}
+
 void solder_quit(void) {
-  if (!initialized) {
+  if (!init_flags) {
     set_error("libsolder is not initialized");
     return;
   }
@@ -38,7 +42,7 @@ void solder_quit(void) {
   so_unload_all();
   so_heap_destroy();
 
-  initialized = 0;
+  init_flags = 0;
 
   solder_dlerror(); // clear error flag
 }
