@@ -56,28 +56,28 @@ int symtab_from_nro(
   const uintptr_t base = (uintptr_t)&_start;
   const Elf64_Dyn *dyn = (const void *)&_DYNAMIC;
   Elf64_Sym *symtab = NULL;
-	char *strtab = NULL;
+  char *strtab = NULL;
   uint32_t *hashtab = NULL;
 
   if (!out_symtab || !out_strtab || !out_hashtab)
     return -1;
 
   // find dynsymtab, hashtab and strtab; this requires the NRO to have been built with -rdynamic
-	for (; dyn->d_tag != DT_NULL; dyn++) {
-		switch (dyn->d_tag) {
-			case DT_STRTAB:
-				strtab = (char *)(base + dyn->d_un.d_ptr);
-				break;
-			case DT_SYMTAB:
-				symtab = (Elf64_Sym *)(base + dyn->d_un.d_ptr);
-				break;
+  for (; dyn->d_tag != DT_NULL; dyn++) {
+    switch (dyn->d_tag) {
+      case DT_STRTAB:
+        strtab = (char *)(base + dyn->d_un.d_ptr);
+        break;
+      case DT_SYMTAB:
+        symtab = (Elf64_Sym *)(base + dyn->d_un.d_ptr);
+        break;
       case DT_HASH:
         hashtab = (uint32_t *)(base + dyn->d_un.d_ptr);
         break;
       default:
         break;
-		}
-	}
+    }
+  }
 
   if (!strtab || !symtab || !hashtab)
     return -2;
