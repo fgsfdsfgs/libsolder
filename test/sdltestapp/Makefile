@@ -64,10 +64,7 @@ ASFLAGS	:=	-g $(ARCH)
 # if we don't exclude the GL libs from dynsyms, something doesn't get stripped and
 # causes anything that uses GL to crash
 LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) \
-			-rdynamic \
-			-Wl,--exclude-libs=libEGL.a \
-			-Wl,--exclude-libs=libglapi.a \
-			-Wl,--exclude-libs=libdrm_nouveau.a
+			-rdynamic -Wl,--exclude-libs=libglapi.a -Wl,--exclude-libs=libdrm_nouveau.a
 
 # alternatively instead of excluding stuff we can link to the shared library
 # that we're going to use, which makes only the necessary symbols appear in .dynsym
