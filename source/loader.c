@@ -3,15 +3,20 @@
 #include <stdint.h>
 #include <switch.h>
 #include <string.h>
+#include <malloc.h>
 #include <elf.h>
 
 #include "solder.h"
 #include "util.h"
-#include "heap.h"
 #include "exports.h"
 
 enum dynmod_flags_internal {
-  MOD_OWN_SYMTAB = 1 << 16,
+  // states
+  MOD_RELOCATED   = 1 << 17,
+  MOD_MAPPED      = 1 << 18,
+  MOD_INITIALIZED = 1 << 19,
+  // additional flags
+  MOD_OWN_SYMTAB  = 1 << 24,
 };
 
 typedef struct dynmod_seg {
@@ -34,14 +39,10 @@ typedef struct dynmod {
   dynmod_seg_t *segs;
   size_t num_segs;
 
-  Elf64_Ehdr *ehdr;
-  Elf64_Phdr *phdr;
-  Elf64_Shdr *shdr;
   Elf64_Dyn *dynamic;
   Elf64_Sym *dynsym;
   size_t num_dynsym;
 
-  char *shstrtab;
   char *dynstrtab;
   uint32_t *hashtab;
 
@@ -60,20 +61,16 @@ extern int _start;
 static dynmod_t so_list = {
   "$main",
   .load_virtbase = (void *)&_start,
+  // we're already all done
+  .flags = MOD_MAPPED | MOD_RELOCATED | MOD_INITIALIZED,
 };
-
-static inline Elf64_Shdr *so_find_section(dynmod_t *mod, const char *secname) {
-  if (!mod || !mod->shstrtab || !mod->shdr || !mod->ehdr)
-    return NULL;
-  for (size_t i = 0; i < mod->ehdr->e_shnum; i++) {
-    if (!strcmp(mod->shstrtab + mod->shdr[i].sh_name, secname))
-      return mod->shdr + i;
-  }
-  return NULL;
-}
 
 static dynmod_t *so_load(const char *filename) {
   size_t so_size = 0;
+  Elf64_Ehdr *ehdr = NULL;
+  Elf64_Phdr *phdr = NULL;
+  Elf64_Shdr *shdr = NULL;
+  char *shstrtab = NULL;
 
   dynmod_t *mod = calloc(1, sizeof(dynmod_t));
   if (!mod) {
@@ -92,46 +89,39 @@ static dynmod_t *so_load(const char *filename) {
   so_size = ftell(fd);
   fseek(fd, 0, SEEK_SET);
 
-  mod->ehdr = malloc(so_size);
-  if (!mod->ehdr) {
+  DEBUG_PRINTF("`%s`: total elf size is %lu\n", filename, so_size);
+
+  ehdr = memalign(ALIGN_PAGE, so_size);
+  if (!ehdr) {
     set_error("Could not allocate %lu bytes for `%s`", so_size, filename);
     fclose(fd);
     free(mod);
     return NULL;
   }
 
-  fread(mod->ehdr, so_size, 1, fd);
+  fread(ehdr, so_size, 1, fd);
   fclose(fd);
 
-  if (memcmp(mod->ehdr, ELFMAG, SELFMAG) != 0) {
+  if (memcmp(ehdr, ELFMAG, SELFMAG) != 0) {
     set_error("`%s` is not a valid ELF file", filename);
     goto err_free_so;
   }
 
-  mod->phdr = (Elf64_Phdr *)((uintptr_t)mod->ehdr + mod->ehdr->e_phoff);
-  mod->shdr = (Elf64_Shdr *)((uintptr_t)mod->ehdr + mod->ehdr->e_shoff);
-  mod->shstrtab = (char *)((uintptr_t)mod->ehdr + mod->shdr[mod->ehdr->e_shstrndx].sh_offset);
+  phdr = (Elf64_Phdr *)((uintptr_t)ehdr + ehdr->e_phoff);
+  shdr = (Elf64_Shdr *)((uintptr_t)ehdr + ehdr->e_shoff);
+  shstrtab = (char *)((uintptr_t)ehdr + shdr[ehdr->e_shstrndx].sh_offset);
 
   // calculate total size of the LOAD segments
   // total size = size of last load segment + vaddr of last load segment
-  for (size_t i = 0; i < mod->ehdr->e_phnum; i++) {
-    if (mod->phdr[i].p_type == PT_LOAD && mod->phdr[i].p_memsz) {
-      const size_t this_size = mod->phdr[i].p_vaddr + ALIGN_MEM(mod->phdr[i].p_memsz, mod->phdr[i].p_align);
+  for (size_t i = 0; i < ehdr->e_phnum; i++) {
+    if (phdr[i].p_type == PT_LOAD && phdr[i].p_memsz) {
+      const size_t this_size = phdr[i].p_vaddr + phdr[i].p_memsz;
       if (this_size > mod->load_size) mod->load_size = this_size;
       ++mod->num_segs;
     }
   }
-  // align total size to page size
-  mod->load_size = ALIGN_MEM(mod->load_size, ALIGN_PAGE);
 
-  // allocate space for all load segments (align to page size)
-  // TODO: find out a way to allocate memory that doesn't fuck with the heap
-  mod->load_base = so_heap_alloc(mod->load_size);
-  if (!mod->load_base) {
-    set_error("Could not allocate %lu bytes while loading `%s`", filename);
-    goto err_free_so;
-  }
-  memset(mod->load_base, 0, mod->load_size);
+  DEBUG_PRINTF("`%s`: total memory reserved %lu; %lu segs total\n", filename, mod->load_size, mod->num_segs);
 
   // reserve virtual memory space for the entire LOAD zone while we're fucking with the ELF
   virtmemLock();
@@ -145,23 +135,33 @@ static dynmod_t *so_load(const char *filename) {
     set_error("Could not allocate space for `%s`'s segment table", filename);
     goto err_free_load;
   }
-  for (size_t i = 0, n = 0; i < mod->ehdr->e_phnum; i++) {
-    if (mod->phdr[i].p_type == PT_LOAD && mod->phdr[i].p_memsz) {
-      if (mod->phdr[i].p_flags & PF_R) mod->segs[n].pflags |= Perm_R;
-      if (mod->phdr[i].p_flags & PF_W) mod->segs[n].pflags |= Perm_W;
-      if (mod->phdr[i].p_flags & PF_X) mod->segs[n].pflags |= Perm_X;
-      mod->segs[n].size = mod->phdr[i].p_memsz;
-      mod->segs[n].base = (void *)((Elf64_Addr)mod->load_base + mod->phdr[i].p_vaddr);
-      mod->segs[n].virtbase = (void *)((Elf64_Addr)mod->load_virtbase + mod->phdr[i].p_vaddr);
-      mod->phdr[i].p_vaddr = (Elf64_Addr)mod->segs[n].virtbase;
-      memcpy(mod->segs[n].base, (void *)((uintptr_t)mod->ehdr + mod->phdr[i].p_offset),
-        mod->phdr[i].p_filesz);
+  for (size_t i = 0, n = 0; i < ehdr->e_phnum; i++) {
+    if (phdr[i].p_type == PT_LOAD && phdr[i].p_memsz) {
+      if (phdr[i].p_flags & PF_R) mod->segs[n].pflags |= Perm_R;
+      if (phdr[i].p_flags & PF_W) mod->segs[n].pflags |= Perm_W;
+      if (phdr[i].p_flags & PF_X) mod->segs[n].pflags |= Perm_X;
+      mod->segs[n].size = ALIGN_MEM(phdr[i].p_memsz, ALIGN_PAGE);
+      mod->segs[n].virtbase = (void *)((Elf64_Addr)mod->load_virtbase + phdr[i].p_vaddr);
+      DEBUG_PRINTF("`%s`: seg %lu: vbase %16p size %lu\n", filename, n, mod->segs[n].virtbase, mod->segs[n].size);
+      // create an aligned copy of the segment
+      mod->segs[n].base = memalign(ALIGN_PAGE, mod->segs[n].size);
+      if (!mod->segs[n].base) {
+        set_error("Could not allocate `%lu` bytes for segment %lu\n", mod->segs[n].size, n);
+        goto err_free_load;
+      }
+      // fill it in
+      memcpy(mod->segs[n].base, (void *)((uintptr_t)ehdr + phdr[i].p_offset),
+        phdr[i].p_filesz);
+      phdr[i].p_vaddr = (Elf64_Addr)mod->segs[n].virtbase;
       ++n;
-    } else if (mod->phdr[i].p_type == PT_DYNAMIC) {
+    } else if (phdr[i].p_type == PT_DYNAMIC) {
       // remember the dynamic seg
-      mod->dynamic = (Elf64_Dyn *)((Elf64_Addr)mod->load_base + mod->phdr[i].p_vaddr);
+      mod->dynamic = (Elf64_Dyn *)((Elf64_Addr)mod->load_virtbase + phdr[i].p_vaddr);
     }
   }
+
+  // base is the base of the first segment
+  mod->load_base = mod->segs[0].base;
 
   if (!mod->dynamic) {
     set_error("`%s` doesn't have a DYNAMIC segment", filename);
@@ -169,22 +169,22 @@ static dynmod_t *so_load(const char *filename) {
   }
 
   // find special sections
-  for (int i = 0; i < mod->ehdr->e_shnum; i++) {
-    const char *sh_name = mod->shstrtab + mod->shdr[i].sh_name;
+  for (int i = 0; i < ehdr->e_shnum; i++) {
+    const char *sh_name = shstrtab + shdr[i].sh_name;
     if (!strcmp(sh_name, ".dynsym")) {
-      mod->dynsym = (Elf64_Sym *)((Elf64_Addr)mod->load_base + mod->shdr[i].sh_addr);
-      mod->num_dynsym = mod->shdr[i].sh_size / sizeof(Elf64_Sym);
+      mod->dynsym = (Elf64_Sym *)((Elf64_Addr)mod->load_virtbase + shdr[i].sh_addr);
+      mod->num_dynsym = shdr[i].sh_size / sizeof(Elf64_Sym);
     } else if (!strcmp(sh_name, ".dynstr")) {
-      mod->dynstrtab = (char *)((Elf64_Addr)mod->load_base + mod->shdr[i].sh_addr);
+      mod->dynstrtab = (char *)((Elf64_Addr)mod->load_virtbase + shdr[i].sh_addr);
     } else if (!strcmp(sh_name, ".hash")) {
       // optional: if there's no hashtab, linear lookup will be used
-      mod->hashtab = (uint32_t *)((Elf64_Addr)mod->load_base + mod->shdr[i].sh_addr);
+      mod->hashtab = (uint32_t *)((Elf64_Addr)mod->load_virtbase + shdr[i].sh_addr);
     } else if (!strcmp(sh_name, ".init_array")) {
-      mod->init_array = (void *)((Elf64_Addr)mod->load_virtbase + mod->shdr[i].sh_addr);
-      mod->num_init = mod->shdr[i].sh_size / sizeof(void *);
+      mod->init_array = (void *)((Elf64_Addr)mod->load_virtbase + shdr[i].sh_addr);
+      mod->num_init = shdr[i].sh_size / sizeof(void *);
     } else if (!strcmp(sh_name, ".fini_array")) {
-      mod->fini_array = (void *)((Elf64_Addr)mod->load_virtbase + mod->shdr[i].sh_addr);
-      mod->num_fini = mod->shdr[i].sh_size / sizeof(void *);
+      mod->fini_array = (void *)((Elf64_Addr)mod->load_virtbase + shdr[i].sh_addr);
+      mod->num_fini = shdr[i].sh_size / sizeof(void *);
     }
   }
 
@@ -193,66 +193,47 @@ static dynmod_t *so_load(const char *filename) {
     goto err_free_load;
   }
 
+  // map all the segs in right away
+  Result rc = 0;
+  Handle self = envGetOwnProcessHandle();
+  for (size_t i = 0; i < mod->num_segs; ++i) {
+    rc = svcMapProcessCodeMemory(self, (u64)mod->segs[i].virtbase, (u64)mod->segs[i].base, mod->segs[i].size);
+    if (R_FAILED(rc)) {
+      set_error("`%s`: svcMapProcessCodeMemory failed on seg %lu:\n%08x", mod->name, i, rc);
+      goto err_free_unmap;
+    }
+    rc = svcSetProcessMemoryPermission(self, (u64)mod->segs[i].virtbase, mod->segs[i].size, mod->segs[i].pflags);
+    if (R_FAILED(rc)) {
+      set_error("`%s`: svcSetProcessMemoryPermission failed on seg %lu:\n%08x", mod->name, i, rc);
+      goto err_free_unmap;
+    }
+  }
+
   mod->name = ustrdup(filename);
+  mod->flags |= MOD_MAPPED;
+
+  free(ehdr); // don't need this no more
 
   return mod;
 
+err_free_unmap:
+  for (size_t i = 0; i < mod->num_segs; ++i)
+    svcUnmapProcessCodeMemory(self, (u64)mod->segs[i].virtbase, (u64)mod->segs[i].base, mod->segs[i].size);
 err_free_load:
   virtmemLock();
   virtmemRemoveReservation(mod->load_memrv);
   virtmemUnlock();
-  so_heap_free(mod->load_base);
+  for (size_t i = 0; i < mod->num_segs; ++i)
+    free(mod->segs[i].base);
 err_free_so:
   free(mod->segs);
-  free(mod->ehdr);
+  free(ehdr);
   free(mod);
 
   return NULL;
 }
 
-static inline int so_process_relocs(dynmod_t *mod, const Elf64_Rela *rels, const size_t num_rels) {
-  for (size_t j = 0; j < num_rels; j++) {
-    uintptr_t *ptr = (uintptr_t *)((uintptr_t)mod->load_base + rels[j].r_offset);
-    Elf64_Sym *sym = &mod->dynsym[ELF64_R_SYM(rels[j].r_info)];
-    const int type = ELF64_R_TYPE(rels[j].r_info);
-    switch (type) {
-      case R_AARCH64_ABS64:
-        // FIXME: = or += ?
-        *ptr = (uintptr_t)mod->load_virtbase + sym->st_value + rels[j].r_addend;
-        break;
-      case R_AARCH64_RELATIVE:
-        // sometimes the value of r_addend is also at *ptr
-        *ptr = (uintptr_t)mod->load_virtbase + rels[j].r_addend;
-        break;
-      case R_AARCH64_GLOB_DAT:
-      case R_AARCH64_JUMP_SLOT:
-        if (sym->st_shndx != SHN_UNDEF)
-          *ptr = (uintptr_t)mod->load_virtbase + sym->st_value + rels[j].r_addend;
-        break;
-      case R_AARCH64_NONE:
-        break; // sorry nothing
-      default:
-        set_error("`%s`: Unknown relocation type: %x", mod->name, type);
-        return -1;
-    }
-  }
-  return 0;
-}
-
-static int so_relocate(dynmod_t *mod) {
-  for (size_t i = 0; i < mod->ehdr->e_shnum; i++) {
-    const char *sh_name = mod->shstrtab + mod->shdr[i].sh_name;
-    if (!strcmp(sh_name, ".rela.dyn") || !strcmp(sh_name, ".rela.plt")) {
-      const Elf64_Rela *rels = (Elf64_Rela *)((uintptr_t)mod->load_base + mod->shdr[i].sh_addr);
-      const size_t num_rels = mod->shdr[i].sh_size / sizeof(Elf64_Rela);
-      if (so_process_relocs(mod, rels, num_rels))
-        return -1;
-    }
-  }
-  return 0;
-}
-
-static inline const Elf64_Sym *so_lookup_symbol(const dynmod_t *mod, const char *symname) {
+static inline const Elf64_Sym *so_lookup_in_module(const dynmod_t *mod, const char *symname) {
   if (!mod || !mod->dynsym || !mod->dynstrtab)
     return NULL;
   // if hashtab is available, use that for lookup, otherwise do linear search
@@ -271,58 +252,116 @@ static inline void *so_lookup(const char *symname) {
     return NULL;
   const dynmod_t *mod = &so_list;
   while (mod) {
-    const Elf64_Sym *sym = so_lookup_symbol(mod, symname);
+    const Elf64_Sym *sym = so_lookup_in_module(mod, symname);
     if (sym) return (void *)((uintptr_t)mod->load_virtbase + sym->st_value);
     mod = mod->next;
   }
   return NULL;
 }
 
-static inline int so_resolve_relocs(dynmod_t *mod, const Elf64_Rela *rels, const size_t num_rels, const int taint) {
+static inline int so_process_relocs(dynmod_t *mod, const Elf64_Rela *rels, const size_t num_rels) {
   for (size_t j = 0; j < num_rels; j++) {
-    uintptr_t *ptr = (uintptr_t *)((uintptr_t)mod->load_base + rels[j].r_offset);
-    const Elf64_Sym *sym = &mod->dynsym[ELF64_R_SYM(rels[j].r_info)];
-    // skip shit that's already defined
-    if (sym->st_shndx != SHN_UNDEF) continue;
+    uintptr_t *ptr = (uintptr_t *)((uintptr_t)mod->load_virtbase + rels[j].r_offset);
+    const uintptr_t symno = ELF64_R_SYM(rels[j].r_info);
     const int type = ELF64_R_TYPE(rels[j].r_info);
-    const char *name;
-    void *othersym;
+    uintptr_t symval = 0;
+    uintptr_t symbase = (uintptr_t)mod->load_virtbase;
+
+    if (symno) {
+      // if the reloc refers to a symbol, get the symbol value in there
+      const Elf64_Sym *sym = &mod->dynsym[symno];
+      if (sym->st_shndx == SHN_UNDEF) {
+        const char *symname = mod->dynstrtab + sym->st_name;
+        symval = (uintptr_t)so_lookup(symname);
+        symbase = 0; // symbol is somewhere else
+        if (!symval) DEBUG_PRINTF("`%s`: resolution failed for `%s`\n", mod->name, symname);
+      } else { 
+        symval = sym->st_value;
+      }
+    }
+
     switch (type) {
+      case R_AARCH64_RELATIVE:
+        // sometimes the value of r_addend is also at *ptr
+        *ptr = symbase + rels[j].r_addend;
+        break;
       case R_AARCH64_ABS64:
       case R_AARCH64_GLOB_DAT:
       case R_AARCH64_JUMP_SLOT:
-        name = mod->dynstrtab + sym->st_name;
-        othersym = so_lookup(name);
-        if (othersym)
-          *ptr = (uintptr_t)othersym + rels[j].r_addend;
-        else if (taint) // make it crash in a predictable way when debugging
-          *ptr = (type == R_AARCH64_ABS64) ? 0 : rels[j].r_offset;
+        *ptr = symval + rels[j].r_addend;
         break;
+      case R_AARCH64_NONE:
+        break; // sorry nothing
       default:
-        break;
-    }
-  }
-  return 0;
-}
-
-static int so_resolve(dynmod_t *mod, const int taint_missing) {
-  for (size_t i = 0; i < mod->ehdr->e_shnum; i++) {
-    const char *sh_name = mod->shstrtab + mod->shdr[i].sh_name;
-    if (!strcmp(sh_name, ".rela.dyn") || !strcmp(sh_name, ".rela.plt")) {
-      Elf64_Rela *rela = (Elf64_Rela *)((uintptr_t)mod->load_base + mod->shdr[i].sh_addr);
-      const size_t num_rela = mod->shdr[i].sh_size / sizeof(Elf64_Rela);
-      if (so_resolve_relocs(mod, rela, num_rela, taint_missing))
+        set_error("`%s`: Unknown relocation type: %x", mod->name, type);
         return -1;
     }
   }
   return 0;
 }
 
-static int so_unload(dynmod_t *mod) {
-  if (mod->load_base == NULL)
-    return -1;
+static int so_relocate(dynmod_t *mod) {
+  Elf64_Rela *rela = NULL;
+  Elf64_Rela *jmprel = NULL;
+  uint32_t pltrel = 0;
+  size_t relasz = 0;
+  size_t pltrelsz = 0;
 
-  // execute destructors, if any
+  // find RELA and JMPREL
+  for (Elf64_Dyn *dyn = mod->dynamic; dyn->d_tag != DT_NULL; dyn++) {
+    switch (dyn->d_tag) {
+      case DT_RELA:
+        rela = (Elf64_Rela *)(mod->load_virtbase + dyn->d_un.d_ptr);
+        break;
+      case DT_RELASZ:
+        relasz = dyn->d_un.d_val;
+        break;
+      case DT_JMPREL:
+        // TODO: don't assume RELA
+        jmprel = (Elf64_Rela *)(mod->load_virtbase + dyn->d_un.d_ptr);
+        break;
+      case DT_PLTREL:
+        pltrel = dyn->d_un.d_val;
+        break;
+      case DT_PLTRELSZ:
+        pltrelsz = dyn->d_un.d_val;
+        break;
+      default:
+        break;
+    }
+  }
+
+  if (rela && relasz) {
+    DEBUG_PRINTF("`%s`: processing RELA@%p size %lu\n", mod->name, rela, relasz);
+    if (so_process_relocs(mod, rela, relasz / sizeof(Elf64_Rela)))
+      return -1;
+  }
+
+  if (jmprel && pltrelsz && pltrel) {
+    // TODO: support DT_REL
+    if (pltrel == DT_RELA) {
+      DEBUG_PRINTF("`%s`: processing JMPREL@%p size %lu\n", mod->name, jmprel, pltrelsz);
+      if (so_process_relocs(mod, jmprel, pltrelsz / sizeof(Elf64_Rela)))
+        return -1;
+    } else {
+      DEBUG_PRINTF("`%s`: DT_JMPREL has unsupported type %08x\n", mod->name, pltrel);
+    }
+  }
+
+  mod->flags |= MOD_RELOCATED;
+
+  return 0;
+}
+
+static void so_initialize(dynmod_t *mod) {
+  if (mod->init_array) {
+    for (size_t i = 0; i < mod->num_init; ++i)
+      if (mod->init_array[i])
+        mod->init_array[i]();
+  }
+}
+
+static void so_finalize(dynmod_t *mod) {
   if (mod->fini_array) {
     for (size_t i = 0; i < mod->num_fini; ++i)
       if (mod->fini_array[i])
@@ -330,22 +369,25 @@ static int so_unload(dynmod_t *mod) {
     mod->fini_array = NULL;
     mod->num_fini = 0;
   }
+}
 
-  if (mod->ehdr) {
-    // someone forgot to free the temp data
-    free(mod->ehdr);
-  }
+static int so_unload(dynmod_t *mod) {
+  if (mod->load_base == NULL)
+    return -1;
 
-  // remap every non-RW segment as RW
+  // execute destructors, if any
+  so_finalize(mod);
+
+  // unmap and free all segs
+  Handle self = envGetOwnProcessHandle();
   for (size_t i = 0; i < mod->num_segs; ++i) {
-    if (mod->segs[i].pflags != Perm_Rw) {
-      const u64 asize = ALIGN_MEM(mod->segs[i].size, ALIGN_PAGE);
-      svcSetProcessMemoryPermission(envGetOwnProcessHandle(), (u64)mod->segs[i].virtbase, asize, Perm_Rw);
-    }
+    svcUnmapProcessCodeMemory(self, (u64)mod->segs[i].virtbase, (u64)mod->segs[i].base, mod->segs[i].size);
+    // restore permissions if needed (maybe not needed at all)
+    if (mod->segs[i].pflags != Perm_Rw)
+      svcSetProcessMemoryPermission(self, (u64)mod->segs[i].virtbase, mod->segs[i].size, Perm_Rw);
+    free(mod->segs[i].base);
+    mod->segs[i].base = NULL;
   }
-
-  // unmap everything
-  svcUnmapProcessCodeMemory(envGetOwnProcessHandle(), (u64)mod->load_virtbase, (u64)mod->load_base, mod->load_size);
 
   // release virtual address range
   virtmemLock();
@@ -359,9 +401,8 @@ static int so_unload(dynmod_t *mod) {
     free(mod->hashtab);
   }
 
-  so_heap_free(mod->load_base);
-  mod->load_base = NULL;
-
+  // free everything else
+  free(mod->segs);
   free(mod->name);
   free(mod);
 
@@ -385,75 +426,11 @@ static void so_unlink(dynmod_t *mod) {
   mod->prev = NULL;
 }
 
-static int so_map(dynmod_t *mod) {
-  Result rc = 0;
-
-  // map the entire thing as code memory
-  rc = svcMapProcessCodeMemory(envGetOwnProcessHandle(), (u64)mod->load_virtbase, (u64)mod->load_base, mod->load_size);
-  if (R_FAILED(rc)) {
-    set_error("`%s`: svcMapProcessCodeMemory failed:\n%08x", mod->name, rc);
+static int so_relocate_and_init(dynmod_t *mod) {
+  if (so_relocate(mod))
     return -1;
-  }
-
-  // set permissions for each seg
-  for (size_t i = 0; i < mod->num_segs; ++i) {
-    const u64 asize = ALIGN_MEM(mod->segs[i].size, ALIGN_PAGE); // align to page
-    rc = svcSetProcessMemoryPermission(envGetOwnProcessHandle(), (u64)mod->segs[i].virtbase, asize, mod->segs[i].pflags);
-    if (R_FAILED(rc)) {
-      set_error("`%s`: could not map %u bytes of %x memory at %p:\n%08x",
-        mod->name, asize, mod->segs[i].pflags, mod->segs[i].virtbase, rc);
-      return -2;
-    }
-  }
-
-  // after mapping all of the tables will be at virtmem, so change accordingly
-  if (!(mod->flags & MOD_OWN_SYMTAB)) {
-    if (mod->dynsym)
-      mod->dynsym = (void *)(((uintptr_t)mod->dynsym - (uintptr_t)mod->load_base) + (uintptr_t)mod->load_virtbase);
-    if (mod->hashtab)
-      mod->hashtab = (void *)(((uintptr_t)mod->hashtab - (uintptr_t)mod->load_base) + (uintptr_t)mod->load_virtbase);
-    if (mod->dynstrtab)
-      mod->dynstrtab = (void *)(((uintptr_t)mod->dynstrtab - (uintptr_t)mod->load_base) + (uintptr_t)mod->load_virtbase);
-  }
-  if (mod->dynamic)
-    mod->dynamic = (void *)(((uintptr_t)mod->dynamic - (uintptr_t)mod->load_base) + (uintptr_t)mod->load_virtbase);
-
-  return 0;
-}
-
-static void so_flush_caches(dynmod_t *mod) {
-  // crashes. apparently when using SetProcessMemoryPermission like this?
-  // armDCacheFlush(mod->load_base, mod->load_size);
-  // armICacheInvalidate(mod->load_virtbase, mod->load_size);
-}
-
-static int so_finalize(dynmod_t *mod) {
-  // resolve all imports
-  so_resolve(mod, 1);
-
-  // try to map the module as executable
-  if (so_map(mod)) return -1;
-
-  // before running any loaded code flush the cpu cache
-  so_flush_caches(mod);
-
-  // execute constructors, if any
-  if (mod->init_array) {
-    for (size_t i = 0; i < mod->num_init; ++i)
-      if (mod->init_array[i])
-        mod->init_array[i]();
-  }
-
-  // remove the temp data (can't use headers after this)
-  free(mod->ehdr);
-  mod->ehdr = NULL;
-  mod->phdr = NULL;
-  mod->shdr = NULL;
-  mod->shstrtab = NULL;
-
-  // link it into the global module list
+  so_initialize(mod);
   so_link(mod);
-
   return 0;
 }
 
@@ -499,21 +476,15 @@ void *solder_dlopen(const char *fname, int flags) {
   mod = so_load(fname);
   if (!mod) return NULL;
 
-  // relocate it
-  if (so_relocate(mod)) {
-    so_unload(mod);
-    return NULL;
-  }
-
-  // if lazy loading isn't requested, resolve imports and load it right away
+  // relocate and init it right away if not lazy
   if (!(flags & SOLDER_LAZY)) {
-    if (so_finalize(mod)) {
+    if (so_relocate_and_init(mod)) {
       so_unload(mod);
       return NULL;
     }
   }
 
-  mod->flags = flags;
+  mod->flags |= flags;
   mod->refcount = 1;
 
   return mod;
@@ -548,9 +519,9 @@ void *solder_dlsym(void *__restrict handle, const char *__restrict symname) {
 
   dynmod_t *mod = handle;
 
-  if (mod->ehdr) {
+  if (!(mod->flags & MOD_RELOCATED)) {
     // module isn't ready yet; try to finalize it
-    if (so_finalize(mod)) {
+    if (so_relocate_and_init(mod)) {
       so_unload(mod);
       return NULL;
     }
@@ -562,7 +533,7 @@ void *solder_dlsym(void *__restrict handle, const char *__restrict symname) {
     return NULL;
   }
 
-  const Elf64_Sym *sym = so_lookup_symbol(mod, symname);
+  const Elf64_Sym *sym = so_lookup_in_module(mod, symname);
   if (sym) return (void *)((uintptr_t)mod->load_virtbase + sym->st_value);
 
   set_error("`%s`: symbol `%s` not found", mod->name, symname);
@@ -605,15 +576,10 @@ void *solder_get_data_addr(void *handle) {
   }
 
   dynmod_t *mod = handle;
-  if (mod->ehdr == NULL) {
-    set_error("`%s`: Already mapped as R/X", mod->name);
-    return NULL;
-  }
-
   // find data-looking segment
   for (size_t i = 0; i < mod->num_segs; ++i)
     if (mod->segs[i].pflags == Perm_R)
-      return mod->segs[i].base;
+      return mod->segs[i].virtbase;
 
   return NULL;
 }
@@ -625,15 +591,10 @@ void *solder_get_text_addr(void *handle) {
   }
 
   dynmod_t *mod = handle;
-  if (mod->ehdr == NULL) {
-    set_error("`%s`: Already mapped as R/X", mod->name);
-    return NULL;
-  }
-
   // find text-looking segment
   for (size_t i = 0; i < mod->num_segs; ++i)
     if (mod->segs[i].pflags == Perm_Rx)
-      return mod->segs[i].base;
+      return mod->segs[i].virtbase;
 
   return NULL;
 }
@@ -645,8 +606,8 @@ int solder_hook_function(void *__restrict handle, const char *__restrict symname
   }
 
   dynmod_t *mod = handle;
-  if (mod->ehdr == NULL) {
-    set_error("`%s`: Already mapped as R/X", mod->name);
+  if (mod->flags & MOD_MAPPED) {
+    set_error("`%s`: Already remapped as R/X", mod->name);
     return -2;
   }
 

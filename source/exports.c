@@ -15,6 +15,8 @@
 #include <elf.h>
 
 #include "solder.h"
+#include "util.h"
+#include "exports.h"
 
 uint32_t elf_hash(const uint8_t *name) {
   uint64_t h = 0, g;
@@ -58,6 +60,7 @@ int symtab_from_nro(
   Elf64_Sym *symtab = NULL;
   char *strtab = NULL;
   uint32_t *hashtab = NULL;
+  size_t strtabsz = 0;
 
   if (!out_symtab || !out_strtab || !out_hashtab)
     return -1;
@@ -74,12 +77,15 @@ int symtab_from_nro(
       case DT_HASH:
         hashtab = (uint32_t *)(base + dyn->d_un.d_ptr);
         break;
+      case DT_STRSZ:
+        strtabsz = dyn->d_un.d_val;
+        break;
       default:
         break;
     }
   }
 
-  if (!strtab || !symtab || !hashtab)
+  if (!strtab || !symtab || !hashtab || !strtabsz)
     return -2;
 
   *out_strtab = strtab;

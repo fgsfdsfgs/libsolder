@@ -4,7 +4,7 @@
 #include <elf.h>
 #include "solder.h"
 
-uint64_t elf_hash(const char *name);
+uint32_t elf_hash(const uint8_t *name);
 
 const Elf64_Sym *elf_hashtab_lookup(
   const char *strtab,

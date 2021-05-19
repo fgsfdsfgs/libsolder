@@ -2,21 +2,17 @@
 #include <stdio.h>
 
 #include "util.h"
-#include "heap.h"
 #include "loader.h"
 #include "exports.h"
 #include "solder.h"
 
 static int init_flags = 0;
 
-int solder_init(const int heapsize, const int flags) {
+int solder_init(const int flags) {
   if (init_flags) {
     set_error("libsolder is already initialized");
     return -2;
   }
-
-  const size_t hsize = so_heap_init(heapsize);
-  if (hsize == 0) return -1;
 
   init_flags = SOLDER_INITIALIZED | flags;
 
@@ -40,7 +36,6 @@ void solder_quit(void) {
   }
 
   so_unload_all();
-  so_heap_destroy();
 
   init_flags = 0;
 

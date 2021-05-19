@@ -3,6 +3,8 @@
 #include <stdarg.h>
 #include <string.h>
 
+#include "util.h"
+
 #define MAX_ERROR 2048
 
 static char errbuf[MAX_ERROR];
@@ -14,7 +16,7 @@ void set_error(const char *fmt, ...) {
   if (!err) {
     vsnprintf(errbuf, sizeof(errbuf), fmt, args);
     err = errbuf;
-    printf("solder error: %s\n", err);
+    DEBUG_PRINTF("solder error: %s\n", err);
   }
   va_end(args);
 }

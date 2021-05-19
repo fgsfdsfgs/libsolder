@@ -20,7 +20,7 @@ void wait_for_button(void) {
 
 int main(int argc, char* argv[]) {
   // init solder as early as possible
-  int rc = solder_init(8 * 1024 * 1024, 0);
+  int rc = solder_init(0);
 
   void *clib = NULL;
   int (*fn_test)(float x) = NULL;

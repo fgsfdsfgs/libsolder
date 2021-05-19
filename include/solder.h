@@ -5,7 +5,7 @@ extern "C" {
 #endif
 
 enum solder_init_flags {
-  SOLDER_INITIALIZED = 1,    /* library is operational */
+  SOLDER_INITIALIZED    = 1, /* library is operational */
   SOLDER_NO_NRO_EXPORTS = 2, /* don't autoexport NRO symbols */
 };
 
@@ -31,9 +31,8 @@ typedef struct solder_export {
 extern const int solder_num_default_exports;
 extern const solder_export_t solder_default_exports[];
 
-/* initialize loader, allocating `heapsize` bytes for dynamic libs
-   if heapsize is <= 0, sets the internal default of 32MB */
-int solder_init(const int heapsize, const int flags);
+/* initialize loader */
+int solder_init(const int flags);
 /* deinit loader and free all libraries and library heap */
 void solder_quit(void);
 /* returns the `flags` value with which library was initialized, or 0 if it wasn't */
@@ -52,9 +51,9 @@ int solder_set_main_exports(const solder_export_t *exp, const int numexp);
 
 /* these only work on modules that haven't been finalized, so use LAZY */
 
-/* get data seg address (writable) */
+/* get data seg address (r/o) */
 void *solder_get_data_addr(void *handle);
-/* get text seg address (writable) */
+/* get text seg address (r/x) */
 void *solder_get_text_addr(void *handle);
 /* replace code at `symname` with branch to another function at `dstaddr` */
 int solder_hook_function(void *__restrict handle, const char *__restrict symname, void *dstaddr);
