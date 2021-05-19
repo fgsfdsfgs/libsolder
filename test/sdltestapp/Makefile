@@ -61,11 +61,20 @@ CXXFLAGS	:= $(CFLAGS) -fno-exceptions -fno-rtti
 
 ASFLAGS	:=	-g $(ARCH)
 
-LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+# if we don't exclude the GL libs from dynsyms, something doesn't get stripped and
+# causes anything that uses GL to crash
+LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) \
+			-rdynamic \
+			-Wl,--exclude-libs=libEGL.a \
+			-Wl,--exclude-libs=libglapi.a \
+			-Wl,--exclude-libs=libdrm_nouveau.a
 
-# using -rdynamic on main makes mesa crash somehow, so we explicitly link to the .so
+# alternatively instead of excluding stuff we can link to the shared library
 # that we're going to use, which makes only the necessary symbols appear in .dynsym
-LIBS	:= -lsolderd -lSDL2 -lEGL -lglapi -ldrm_nouveau -lnx -lm $(DEPLIB)
+# note that you will still have to load it manually
+# LIBS	:= -lsolderd -lSDL2 -lEGL -lglapi -ldrm_nouveau -lnx -lm $(DEPLIB)
+
+LIBS	:= -lsolderd -lSDL2 -lEGL -lglapi -ldrm_nouveau -lnx -lm
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
