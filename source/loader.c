@@ -142,7 +142,6 @@ static dynmod_t *so_load(const char *filename) {
       if (phdr[i].p_flags & PF_X) mod->segs[n].pflags |= Perm_X;
       mod->segs[n].size = ALIGN_MEM(phdr[i].p_memsz, ALIGN_PAGE);
       mod->segs[n].virtbase = (void *)((Elf64_Addr)mod->load_virtbase + phdr[i].p_vaddr);
-      DEBUG_PRINTF("`%s`: seg %lu: vbase %16p size %lu\n", filename, n, mod->segs[n].virtbase, mod->segs[n].size);
       // create an aligned copy of the segment
       mod->segs[n].base = memalign(ALIGN_PAGE, mod->segs[n].size);
       if (!mod->segs[n].base) {
@@ -241,7 +240,7 @@ static inline const Elf64_Sym *so_lookup_in_module(const dynmod_t *mod, const ch
     return elf_hashtab_lookup(mod->dynstrtab, mod->dynsym, mod->hashtab, symname);
   // sym 0 is always UNDEF
   for (size_t i = 1; i < mod->num_dynsym; ++i) {
-    if (mod->dynsym[i].st_shndx != SHN_UNDEF && !strcmp(symname, mod->dynstrtab + mod->dynsym[i].st_name))
+    if (!strcmp(symname, mod->dynstrtab + mod->dynsym[i].st_name))
       return mod->dynsym + i;
   }
   return NULL;
@@ -253,7 +252,8 @@ static inline void *so_lookup(const char *symname) {
   const dynmod_t *mod = &so_list;
   while (mod) {
     const Elf64_Sym *sym = so_lookup_in_module(mod, symname);
-    if (sym) return (void *)((uintptr_t)mod->load_virtbase + sym->st_value);
+    if (sym && sym->st_shndx != SHN_UNDEF)
+      return (void *)((uintptr_t)mod->load_virtbase + sym->st_value);
     mod = mod->next;
   }
   return NULL;
