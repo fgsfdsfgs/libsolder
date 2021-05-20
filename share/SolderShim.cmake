@@ -2,7 +2,7 @@
 set_property(GLOBAL PROPERTY TARGET_SUPPORTS_SHARED_LIBS true)
 
 # give it our pseudolinker
-if(CMAKE_BUILD_TYPE EQUAL "Debug")
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_DL_LIBS "-lsolderd" CACHE STRING "" FORCE)
 else()
   set(CMAKE_DL_LIBS "-lsolder" CACHE STRING "" FORCE)
