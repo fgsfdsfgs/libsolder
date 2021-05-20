@@ -149,8 +149,13 @@ static dynmod_t *so_load(const char *filename) {
         goto err_free_load;
       }
       // fill it in
-      memcpy(mod->segs[n].base, (void *)((uintptr_t)ehdr + phdr[i].p_offset),
-        phdr[i].p_filesz);
+      memcpy(mod->segs[n].base, (void *)((uintptr_t)ehdr + phdr[i].p_offset), phdr[i].p_filesz);
+      // zero out the rest
+      if (phdr[i].p_memsz > phdr[i].p_filesz) {
+        const size_t zerosz = phdr[i].p_memsz - phdr[i].p_filesz;
+        DEBUG_PRINTF("`%s`: seg %lu: zeroing out %lu bytes\n", filename, i, zerosz);
+        memset(mod->segs[n].base + phdr[i].p_filesz, 0, zerosz);
+      }
       phdr[i].p_vaddr = (Elf64_Addr)mod->segs[n].virtbase;
       ++n;
     } else if (phdr[i].p_type == PT_DYNAMIC) {
