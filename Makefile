@@ -132,13 +132,15 @@ $(TARGET).pc: $(TARGET).pc.in
 	$(TARGET).pc.in > $(TARGET).pc
 
 .PHONY: install
-install: $(TARGET).pc all
+install: $(TARGET).pc all share/SolderShim.cmake
 	install -d $(DESTDIR)/lib/
 	install -m 644 lib/lib$(TARGET).a $(DESTDIR)/lib/
 	install -m 644 lib/lib$(TARGET)d.a $(DESTDIR)/lib/
 	install -m 644 include/solder.h $(DESTDIR)/include/solder.h
 	install -d $(DESTDIR)/lib/pkgconfig
-	install -m 644 $(TARGET).pc $(DESTDIR)/lib/pkgconfig
+	install -m 644 $(TARGET).pc $(DESTDIR)/lib/pkgconfig/
+	install -d $(DESTDIR)/share
+	install -m 644 share/SolderShim.cmake $(DESTDIR)/share/
 
 #---------------------------------------------------------------------------------
 clean:
