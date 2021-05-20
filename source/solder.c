@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <stdio.h>
+#include <switch.h>
 
 #include "util.h"
 #include "loader.h"
@@ -11,7 +12,19 @@ static int init_flags = 0;
 int solder_init(const int flags) {
   if (init_flags) {
     set_error("libsolder is already initialized");
+    return -1;
+  }
+
+  // check that svcSetProcessMemoryPermission and svcMap/UnmapProcessCodeMemory are available
+  if (!envIsSyscallHinted(0x73) || !envIsSyscallHinted(0x77) || !envIsSyscallHinted(0x78)) {
+    set_error("syscalls not available (0x73, 0x77 or 0x78)");
     return -2;
+  }
+
+  // check that we know our own process handle
+  if (envGetOwnProcessHandle() == INVALID_HANDLE) {
+    set_error("own process handle not available");
+    return -3;
   }
 
   init_flags = SOLDER_INITIALIZED | flags;
