@@ -375,16 +375,24 @@ static int so_unload(dynmod_t *mod) {
   if (mod->load_base == NULL)
     return -1;
 
+  DEBUG_PRINTF("`%s`: unloading\n", mod->name);
+
   // execute destructors, if any
   so_finalize(mod);
 
+  DEBUG_PRINTF("`%s`: unmapping\n", mod->name);
+
   // unmap and free all segs
   Handle self = envGetOwnProcessHandle();
+  Result rc;
   for (size_t i = 0; i < mod->num_segs; ++i) {
-    svcUnmapProcessCodeMemory(self, (u64)mod->segs[i].virtbase, (u64)mod->segs[i].base, mod->segs[i].size);
     // restore permissions if needed (maybe not needed at all)
-    if (mod->segs[i].pflags != Perm_Rw)
-      svcSetProcessMemoryPermission(self, (u64)mod->segs[i].virtbase, mod->segs[i].size, Perm_Rw);
+    if (mod->segs[i].pflags != Perm_Rw) {
+      rc = svcSetProcessMemoryPermission(self, (u64)mod->segs[i].virtbase, mod->segs[i].size, Perm_Rw);
+      if (R_FAILED(rc)) DEBUG_PRINTF("* svcSetProcessMemoryPermission(seg %lu): error %08x\n", i, rc);
+    }
+    rc = svcUnmapProcessCodeMemory(self, (u64)mod->segs[i].virtbase, (u64)mod->segs[i].base, mod->segs[i].size);
+    if (R_FAILED(rc)) DEBUG_PRINTF("* svcUnmapProcessCodeMemory(seg %lu): error %08x\n", i, rc);
     free(mod->segs[i].base);
     mod->segs[i].base = NULL;
   }
@@ -400,6 +408,8 @@ static int so_unload(dynmod_t *mod) {
     free(mod->dynstrtab);
     free(mod->hashtab);
   }
+
+  DEBUG_PRINTF("`%s`: unloaded\n", mod->name);
 
   // free everything else
   free(mod->segs);
@@ -499,6 +509,7 @@ int solder_dlclose(void *handle) {
   dynmod_t *mod = handle;
   // free the module when reference count reaches zero
   if (--mod->refcount <= 0) {
+    DEBUG_PRINTF("`%s`: refcount is 0, unloading\n", mod->name);
     so_unlink(mod);
     return so_unload(mod);
   }
