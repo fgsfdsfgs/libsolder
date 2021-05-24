@@ -373,20 +373,24 @@ static int so_relocate(dynmod_t *mod) {
 
 static void so_initialize(dynmod_t *mod) {
   if (mod->init_array) {
+    DEBUG_PRINTF("`%s`: init array %p has %lu entries\n", mod->name, mod->init_array, mod->num_init);
     for (size_t i = 0; i < mod->num_init; ++i)
       if (mod->init_array[i])
         mod->init_array[i]();
   }
+  mod->flags |= MOD_INITIALIZED;
 }
 
 static void so_finalize(dynmod_t *mod) {
   if (mod->fini_array) {
+    DEBUG_PRINTF("`%s`: fini array %p has %lu entries\n", mod->name, mod->fini_array, mod->num_fini);
     for (size_t i = 0; i < mod->num_fini; ++i)
       if (mod->fini_array[i])
         mod->fini_array[i]();
     mod->fini_array = NULL;
     mod->num_fini = 0;
   }
+  mod->flags &= ~MOD_INITIALIZED;
 }
 
 static int so_unload(dynmod_t *mod) {
@@ -396,7 +400,8 @@ static int so_unload(dynmod_t *mod) {
   DEBUG_PRINTF("`%s`: unloading\n", mod->name);
 
   // execute destructors, if any
-  so_finalize(mod);
+  if (mod->flags & MOD_INITIALIZED)
+    so_finalize(mod);
 
   DEBUG_PRINTF("`%s`: unmapping\n", mod->name);
 
@@ -455,9 +460,10 @@ static void so_unlink(dynmod_t *mod) {
 }
 
 static int so_relocate_and_init(dynmod_t *mod) {
-  if (so_relocate(mod))
+  if (!(mod->flags & MOD_RELOCATED) && so_relocate(mod))
     return -1;
-  so_initialize(mod);
+  if (!(mod->flags & MOD_INITIALIZED))
+    so_initialize(mod);
   so_link(mod);
   return 0;
 }
