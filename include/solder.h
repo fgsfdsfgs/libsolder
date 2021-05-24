@@ -21,6 +21,14 @@ typedef struct solder_export {
   void *addr_rx;     /* executable address */
 } solder_export_t;
 
+/* this is just Dl_info */
+typedef struct solder_dl_info {
+  const char *dli_fname;  /* pathname of shared object that contains address */
+  void *dli_fbase;        /* base address at which shared object is loaded */
+  const char *dli_sname;  /* name of symbol whose definition overlaps addr */
+  void *dli_saddr;        /* exact address of symbol named in dli_sname */
+} solder_dl_info_t;
+
 #define SOLDER_EXPORT_SYMBOL(sym) { #sym, (void *)&sym }
 #define SOLDER_EXPORT(name, addr) { name, addr }
 
@@ -57,6 +65,8 @@ void *solder_get_data_addr(void *handle);
 void *solder_get_text_addr(void *handle);
 /* replace code at `symname` with branch to another function at `dstaddr` */
 int solder_hook_function(void *__restrict handle, const char *__restrict symname, void *dstaddr);
+/* reverse lookup symbol name by its address */
+int solder_dladdr(void *addr, solder_dl_info_t *info);
 
 #ifdef SOLDER_LIBDL_COMPAT
 
@@ -66,6 +76,7 @@ int solder_hook_function(void *__restrict handle, const char *__restrict symname
 #undef dlclose
 #undef dlsym
 #undef dlerror
+#undef dladdr
 #undef RTLD_LOCAL
 #undef RTLD_GLOBAL
 #undef RTLD_NOW
@@ -75,6 +86,7 @@ int solder_hook_function(void *__restrict handle, const char *__restrict symname
 #define dlopen(x, y) solder_dlopen((x), (y))
 #define dlclose(x)   solder_dlclose((x))
 #define dlsym(x, y)  solder_dlsym((x), (y))
+#define dladdr(x, y) solder_dladdr((x), (y))
 #define dlerror()    solder_dlerror()
 
 #define RTLD_LOCAL   SOLDER_LOCAL
@@ -82,6 +94,8 @@ int solder_hook_function(void *__restrict handle, const char *__restrict symname
 #define RTLD_NOW     SOLDER_NOW
 #define RTLD_LAZY    SOLDER_LAZY
 #define RTLD_DEFAULT SOLDER_DEFAULT
+
+typedef solder_dl_info_t Dl_info;
 
 #endif
 

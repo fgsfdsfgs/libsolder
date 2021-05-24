@@ -15,6 +15,7 @@ set(CMAKE_MODULE_LINKER_FLAGS "-fPIE -specs=${DEVKITPRO}/libnx/switch.specs -rdy
 # don't link anything by default
 set(CMAKE_C_STANDARD_LIBRARIES "" CACHE STRING "" FORCE)
 set(CMAKE_CXX_STANDARD_LIBRARIES "" CACHE STRING "" FORCE)
+set(CMAKE_ASM_STANDARD_LIBRARIES "" CACHE STRING "" FORCE)
 
 # warn user about all of this
 message("!! Solder dynamic linking support enabled.")

@@ -250,6 +250,20 @@ static inline const Elf64_Sym *so_lookup_in_module(const dynmod_t *mod, const ch
   return NULL;
 }
 
+static inline const Elf64_Sym *so_reverse_lookup_in_module(const dynmod_t *mod, const void *addr) {
+  if (!(mod->flags & MOD_RELOCATED) || !mod->dynsym || mod->num_dynsym <= 1)
+    return NULL;
+  // skip mandatory UNDEF
+  for (size_t i = 1; i < mod->num_dynsym; ++i) {
+    if (mod->dynsym[i].st_shndx != SHN_UNDEF && mod->dynsym[i].st_value) {
+      const uintptr_t symaddr = mod->dynsym[i].st_value + (uintptr_t)mod->load_virtbase;
+      if (symaddr == (uintptr_t)addr)
+        return mod->dynsym + i;
+    }
+  }
+  return NULL;
+}
+
 static inline void *so_lookup(const char *symname) {
   if (!symname || !*symname)
     return NULL;
@@ -553,6 +567,45 @@ void *solder_dlsym(void *__restrict handle, const char *__restrict symname) {
 
   set_error("`%s`: symbol `%s` not found", mod->name, symname);
   return NULL;
+}
+
+int solder_dladdr(void *addr, solder_dl_info_t *info) {
+  if (!addr || !info) {
+    set_error("solder_dladdr(): NULL args\n");
+    return 0;
+  }
+
+  // by man description only these two fields need to be NULL
+  info->dli_saddr = NULL;
+  info->dli_sname = NULL;
+
+  // ha-ha, time for linear lookup
+  // start with the first loaded module after main, since someone's unlikely to be looking for symbol names inside main
+  const Elf64_Sym *sym = NULL;
+  const dynmod_t *mod;
+  for (mod = so_list.next; mod; mod = mod->next) {
+    sym = so_reverse_lookup_in_module(mod, addr);
+    if (sym) {
+      info->dli_fname = mod->name;
+      info->dli_fbase = mod->load_virtbase;
+      info->dli_saddr = (void *)((uintptr_t)mod->load_virtbase + sym->st_value);
+      info->dli_sname = mod->dynstrtab + sym->st_name;
+      return 1;
+    }
+  }
+
+  // do main module last
+  mod = &so_list;
+  sym = so_reverse_lookup_in_module(mod, addr);
+  if (sym) {
+    info->dli_fname = mod->name;
+    info->dli_fbase = mod->load_virtbase;
+    info->dli_saddr = (void *)((uintptr_t)mod->load_virtbase + sym->st_value);
+    info->dli_sname = mod->dynstrtab + sym->st_name;
+    return 1;
+  }
+
+  return 0;
 }
 
 int solder_set_main_exports(const solder_export_t *exp, const int numexp) {
