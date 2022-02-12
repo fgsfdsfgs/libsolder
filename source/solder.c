@@ -35,6 +35,10 @@ int solder_init(const int flags) {
 
   solder_dlerror(); // clear error flag
 
+  // unless explicitly requested otherwise, try autoloading all linked libraries
+  if (flags & SOLDER_MAIN_AUTOLOAD)
+    so_autoload();
+
   return 0;
 }
 

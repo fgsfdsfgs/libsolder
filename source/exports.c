@@ -189,33 +189,7 @@ _error:
    if you want to go the "link libstdc++ to main" route, you'll have to provide many C++ exports instead
 */
 
-/* unwinding stuff; not declared anywhere, but we can just declare them as ints */
-
-extern int _Unwind_DeleteException;
-extern int _Unwind_GetDataRelBase;
-extern int _Unwind_GetIPInfo;
-extern int _Unwind_GetLanguageSpecificData;
-extern int _Unwind_GetRegionStart;
-extern int _Unwind_GetTextRelBase;
-extern int _Unwind_RaiseException;
-extern int _Unwind_Resume;
-extern int _Unwind_Resume_or_Rethrow;
-extern int _Unwind_SetGR;
-extern int _Unwind_SetIP;
-
-const solder_export_t solder_default_exports[] = {
-  SOLDER_EXPORT_SYMBOL(_Unwind_DeleteException),
-  SOLDER_EXPORT_SYMBOL(_Unwind_GetDataRelBase),
-  SOLDER_EXPORT_SYMBOL(_Unwind_GetIPInfo),
-  SOLDER_EXPORT_SYMBOL(_Unwind_GetLanguageSpecificData),
-  SOLDER_EXPORT_SYMBOL(_Unwind_GetRegionStart),
-  SOLDER_EXPORT_SYMBOL(_Unwind_GetTextRelBase),
-  SOLDER_EXPORT_SYMBOL(_Unwind_RaiseException),
-  SOLDER_EXPORT_SYMBOL(_Unwind_Resume),
-  SOLDER_EXPORT_SYMBOL(_Unwind_Resume_or_Rethrow),
-  SOLDER_EXPORT_SYMBOL(_Unwind_SetGR),
-  SOLDER_EXPORT_SYMBOL(_Unwind_SetIP),
-
+const solder_export_t solder_default_exports[] __attribute__((used)) = {
   SOLDER_EXPORT_SYMBOL(__getreent),
   SOLDER_EXPORT_SYMBOL(__errno),
   SOLDER_EXPORT_SYMBOL(__locale_mb_cur_max),
@@ -323,6 +297,17 @@ const solder_export_t solder_default_exports[] = {
   SOLDER_EXPORT_SYMBOL(pthread_mutex_unlock),
   SOLDER_EXPORT_SYMBOL(pthread_once),
   SOLDER_EXPORT_SYMBOL(pthread_setspecific),
+
+  // export the libdl stuff so that other libs could use it
+  SOLDER_EXPORT_SYMBOL(solder_get_data_addr),
+  SOLDER_EXPORT_SYMBOL(solder_get_text_addr),
+  SOLDER_EXPORT_SYMBOL(solder_hook_function),
+  SOLDER_EXPORT_SYMBOL(solder_init_flags),
+  SOLDER_EXPORT_SYMBOL(solder_dlopen),
+  SOLDER_EXPORT_SYMBOL(solder_dlclose),
+  SOLDER_EXPORT_SYMBOL(solder_dlsym),
+  SOLDER_EXPORT_SYMBOL(solder_dladdr),
+  SOLDER_EXPORT_SYMBOL(solder_dlerror),
 };
 
-const int solder_num_default_exports = sizeof(solder_default_exports) / sizeof(*solder_default_exports);
+const int solder_num_default_exports __attribute__((used)) = sizeof(solder_default_exports) / sizeof(*solder_default_exports);

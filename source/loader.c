@@ -58,14 +58,16 @@ typedef struct dynmod {
 
 // the main module is the head and is never unloaded
 extern int _start;
+extern const int _DYNAMIC;
 static dynmod_t so_list = {
   "$main",
   .load_virtbase = (void *)&_start,
+  .dynamic = (Elf64_Dyn *)&_DYNAMIC,
   // we're already all done
   .flags = MOD_MAPPED | MOD_RELOCATED | MOD_INITIALIZED,
 };
 
-static dynmod_t *so_load(const char *filename) {
+static dynmod_t *so_load(const char *filename, const char *modname) {
   size_t so_size = 0;
   Elf64_Ehdr *ehdr = NULL;
   Elf64_Phdr *phdr = NULL;
@@ -212,7 +214,7 @@ static dynmod_t *so_load(const char *filename) {
     }
   }
 
-  mod->name = ustrdup(filename);
+  mod->name = ustrdup(modname);
   mod->flags |= MOD_MAPPED;
 
   free(ehdr); // don't need this no more
@@ -278,6 +280,8 @@ static inline void *so_lookup(const char *symname) {
 }
 
 static inline int so_process_relocs(dynmod_t *mod, const Elf64_Rela *rels, const size_t num_rels) {
+  int num_failed = 0;
+
   for (size_t j = 0; j < num_rels; j++) {
     uintptr_t *ptr = (uintptr_t *)((uintptr_t)mod->load_virtbase + rels[j].r_offset);
     const uintptr_t symno = ELF64_R_SYM(rels[j].r_info);
@@ -292,7 +296,10 @@ static inline int so_process_relocs(dynmod_t *mod, const Elf64_Rela *rels, const
         const char *symname = mod->dynstrtab + sym->st_name;
         symval = (uintptr_t)so_lookup(symname);
         symbase = 0; // symbol is somewhere else
-        if (!symval) DEBUG_PRINTF("`%s`: resolution failed for `%s`\n", mod->name, symname);
+        if (!symval) {
+          DEBUG_PRINTF("`%s`: resolution failed for `%s`\n", mod->name, symname);
+          ++num_failed;
+        }
       } else { 
         symval = sym->st_value;
       }
@@ -315,7 +322,8 @@ static inline int so_process_relocs(dynmod_t *mod, const Elf64_Rela *rels, const
         return -1;
     }
   }
-  return 0;
+
+  return num_failed;
 }
 
 static int so_relocate(dynmod_t *mod) {
@@ -468,13 +476,30 @@ static int so_relocate_and_init(dynmod_t *mod) {
   return 0;
 }
 
+static void so_relocate_and_init_all(void) {
+  for (dynmod_t *p = so_list.next; p; p = p->next) {
+    if (!(p->flags & MOD_RELOCATED)) {
+      if (so_relocate(p))
+        DEBUG_PRINTF("so_relocate_and_init_all(): could not relocate `%s` yet\n", p->name);
+      else
+        DEBUG_PRINTF("so_relocate_and_init_all(): relocated `%s`\n", p->name);
+    }
+  }
+
+  for (dynmod_t *p = so_list.next; p; p = p->next) {
+    if ((p->flags & MOD_RELOCATED) && !(p->flags & MOD_INITIALIZED)) {
+      DEBUG_PRINTF("so_relocate_and_init_all(): initializing `%s`\n", p->name);
+      so_initialize(p);
+    }
+  }
+}
+
 void so_unload_all(void) {
   dynmod_t *mod = so_list.next;
   so_list.next = NULL;
 
   while (mod) {
     dynmod_t *next = mod->next;
-    next->prev = NULL;
     so_unload(mod);
     mod = next;
   }
@@ -486,6 +511,99 @@ void so_unload_all(void) {
     free(so_list.hashtab); so_list.hashtab = NULL;
     so_list.flags &= ~MOD_OWN_SYMTAB;
   }
+}
+
+static void so_dep_scan(dynmod_t *mod);
+
+static dynmod_t *so_dep_load(dynmod_t *parent, const char *depname) {
+  dynmod_t *mod = NULL;
+
+  // see if the module is already loaded and just increase refcount if it is
+  for (dynmod_t *p = so_list.next; p; p = p->next) {
+    if (!strcmp(p->name, depname)) {
+      mod = p;
+      break;
+    }
+  }
+
+  if (mod) {
+    DEBUG_PRINTF("so_dep_load(%s, %s): `%s` already loaded\n", parent->name, depname, mod->name);
+    mod->refcount++;
+    mod->flags |= SOLDER_GLOBAL;
+    return mod;
+  }
+
+  DEBUG_PRINTF("so_dep_load(%s, %s): trying `%s`\n", parent->name, depname, depname);
+  mod = so_load(depname, depname);
+  if (!mod) {
+    // can't get it; chop off path and try working directory
+    char *slash = strrchr(depname, '/');
+    if (slash) {
+      ++slash;
+      DEBUG_PRINTF("so_dep_load(%s, %s): trying `%s`\n", parent->name, depname, slash);
+      mod = so_load(slash, depname);
+    }
+  }
+
+  if (mod) {
+    mod->flags |= SOLDER_LAZY | SOLDER_GLOBAL;
+    mod->refcount = 1;
+    so_link(mod); // link it early
+    so_dep_scan(mod); // scan it for deps
+  } else {
+    DEBUG_PRINTF("so_dep_load(%s, %s): failed to find dep\n", parent->name, depname);
+  }
+
+  // clear error flag
+  solder_dlerror();
+
+  return mod;
+}
+
+static void so_dep_scan(dynmod_t *mod) {
+  if (!mod || !mod->dynamic) {
+    DEBUG_PRINTF("so_dep_scan(%s): NULL dynamic\n", mod ? mod->name : "(null)");
+    return;
+  }
+
+  DEBUG_PRINTF("so_dep_scan(%s): scanning for deps\n", mod->name);
+
+  const Elf64_Dyn *dyn = mod->dynamic;
+
+  // find strtab
+  const char *strtab = NULL;
+  for (; dyn->d_tag != DT_NULL; dyn++) {
+    if (dyn->d_tag == DT_STRTAB) {
+      strtab = (const char *)(mod->load_virtbase + dyn->d_un.d_ptr);
+      break;
+    }
+  }
+
+  if (strtab == NULL) {
+    DEBUG_PRINTF("so_dep_scan(%s): could not find strtab\n", mod->name);
+    return;
+  }
+
+  // find all DT_NEEDED modules and start loading them
+  for (dyn = mod->dynamic; dyn->d_tag != DT_NULL; dyn++) {
+    if (dyn->d_tag == DT_NEEDED) {
+      const char *dep_modname = strtab + dyn->d_un.d_val;
+      so_dep_load(mod, dep_modname);
+    }
+  }
+
+  // relocate and initialize all modules we just loaded
+  so_relocate_and_init_all();
+
+  // clear error flag
+  solder_dlerror();
+}
+
+void so_autoload(void) {
+  // load main module's dependencies recursively
+  so_dep_scan(&so_list);
+  // TODO: figure out if it's possible to fix undef references in main module
+  //       after it's already loaded
 }
 
 /* libsolder API begins */
@@ -507,7 +625,7 @@ void *solder_dlopen(const char *fname, int flags) {
   }
 
   // load the module
-  mod = so_load(fname);
+  mod = so_load(fname, fname);
   if (!mod) return NULL;
 
   // relocate and init it right away if not lazy
@@ -520,6 +638,9 @@ void *solder_dlopen(const char *fname, int flags) {
 
   mod->flags |= flags;
   mod->refcount = 1;
+
+  // load its dependencies
+  so_dep_scan(mod);
 
   return mod;
 }
@@ -547,31 +668,42 @@ void *solder_dlsym(void *__restrict handle, const char *__restrict symname) {
     return NULL;
   }
 
-  if (!handle) {
-    // NULL handle means main module
-    handle = &so_list;
-  }
+  // NULL handle means search in order starting with the main module
+  dynmod_t *mod = handle ? handle : &so_list;
+  for (; mod; mod = mod->next) {
+    if (!(mod->flags & MOD_RELOCATED)) {
+      // module isn't ready yet; try to finalize it
+      if (so_relocate_and_init(mod)) {
+        so_unload(mod);
+        if (handle)
+          return NULL;
+        else
+          continue;
+      }
+    }
 
-  dynmod_t *mod = handle;
+    // module has no exports
+    if (!mod->dynsym || mod->num_dynsym <= 1) {
+      if (handle) {
+        set_error("`%s`: no exports available", mod->name);
+        return NULL;
+      } else {
+        // continue searching if we're not searching in a specific lib
+        continue;
+      }
+    }
 
-  if (!(mod->flags & MOD_RELOCATED)) {
-    // module isn't ready yet; try to finalize it
-    if (so_relocate_and_init(mod)) {
-      so_unload(mod);
+    const Elf64_Sym *sym = so_lookup_in_module(mod, symname);
+    if (sym) return (void *)((uintptr_t)mod->load_virtbase + sym->st_value);
+
+    // stop early if we're searching in a specific module
+    if (handle) {
+      set_error("`%s`: symbol `%s` not found", mod->name, symname);
       return NULL;
     }
   }
 
-  // module has no exports
-  if (!mod->dynsym || mod->num_dynsym <= 1) {
-    set_error("`%s`: no exports available", mod->name);
-    return NULL;
-  }
-
-  const Elf64_Sym *sym = so_lookup_in_module(mod, symname);
-  if (sym) return (void *)((uintptr_t)mod->load_virtbase + sym->st_value);
-
-  set_error("`%s`: symbol `%s` not found", mod->name, symname);
+  set_error("symbol `%s` not found in any loaded modules", symname);
   return NULL;
 }
 

@@ -7,6 +7,7 @@ extern "C" {
 enum solder_init_flags {
   SOLDER_INITIALIZED    = 1, /* library is operational */
   SOLDER_NO_NRO_EXPORTS = 2, /* don't autoexport NRO symbols */
+  SOLDER_MAIN_AUTOLOAD  = 4, /* automatically load main NRO's dependencies */
 };
 
 enum solder_dlopen_flags {

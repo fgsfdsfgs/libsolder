@@ -12,10 +12,10 @@ endif()
 set(CMAKE_SHARED_LINKER_FLAGS "-fPIE -specs=${DEVKITPRO}/libnx/switch.specs -rdynamic -shared -nostartfiles -nostdlib ${CMAKE_SHARED_LINKER_FLAGS}")
 set(CMAKE_MODULE_LINKER_FLAGS "-fPIE -specs=${DEVKITPRO}/libnx/switch.specs -rdynamic -shared -nostartfiles -nostdlib ${CMAKE_MODULE_LINKER_FLAGS}")
 
-# don't link anything by default
-set(CMAKE_C_STANDARD_LIBRARIES "" CACHE STRING "" FORCE)
-set(CMAKE_CXX_STANDARD_LIBRARIES "" CACHE STRING "" FORCE)
-set(CMAKE_ASM_STANDARD_LIBRARIES "" CACHE STRING "" FORCE)
+# don't link anything except libgcc by default
+set(CMAKE_C_STANDARD_LIBRARIES "-lgcc" CACHE STRING "" FORCE)
+set(CMAKE_CXX_STANDARD_LIBRARIES "-lgcc" CACHE STRING "" FORCE)
+set(CMAKE_ASM_STANDARD_LIBRARIES "-lgcc" CACHE STRING "" FORCE)
 
 # warn user about all of this
 message("!! Solder dynamic linking support enabled.")

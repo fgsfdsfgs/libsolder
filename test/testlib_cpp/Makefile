@@ -20,6 +20,10 @@ BUILD		:=	build
 SOURCES		:=	source
 INCLUDES	:=	include
 
+# dependency lib that we're going to link against
+# use this if building for testapp_autolink
+# DEPLIB	:=	../../testlib/testlib.so
+
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------
@@ -39,9 +43,10 @@ ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) \
 			 -rdynamic -shared -nostartfiles -nostdlib
 
-# have to explicitly link libstdc++ to C++ dynamic libs because of -nostdlib
+# have to explicitly link libgcc and libstdc++ to C++ dynamic libs because of -nostdlib
 # you can choose to not link it and instead provide C++ imports from the main module
-LIBS	:= -lstdc++
+# which is what you should do when building for testapp_autolink
+LIBS	:= -lstdc++ $(DEPLIB) -lgcc
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing

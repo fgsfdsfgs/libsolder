@@ -39,7 +39,8 @@ LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*
 # you can choose to link auxiliary libs to your shared libs or provide them as exports
 # from the main executable, but in the latter case you'll have to ensure that all exports
 # are linked in; libc and crt stuff must always be provided from the main executable
-LIBS	:= -lm
+# libgcc has to be linked to both shared libs and the main executable
+LIBS	:= -lm -lgcc
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
