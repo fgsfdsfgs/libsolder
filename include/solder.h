@@ -5,16 +5,18 @@ extern "C" {
 #endif
 
 enum solder_init_flags {
-  SOLDER_INITIALIZED    = 1, /* library is operational */
-  SOLDER_NO_NRO_EXPORTS = 2, /* don't autoexport NRO symbols */
-  SOLDER_MAIN_AUTOLOAD  = 4, /* automatically load main NRO's dependencies */
+  SOLDER_INITIALIZED     = 1, /* library is operational */
+  SOLDER_NO_NRO_EXPORTS  = 2, /* don't autoexport NRO symbols */
+  SOLDER_MAIN_AUTOLOAD   = 4, /* automatically load main NRO's dependencies */
+  SOLDER_ALLOW_UNDEFINED = 8, /* ignore leftover undefined refs after relocating main NRO's deps */
 };
 
 enum solder_dlopen_flags {
-  SOLDER_LOCAL  = 0, /* don't use this module's symbols when resolving others */
-  SOLDER_GLOBAL = 1, /* use this module's symbols when resolving others */
-  SOLDER_NOW    = 2, /* finalize loading before dlopen() returns */
-  SOLDER_LAZY   = 4, /* finalize loading only after dlsym() is called */
+  SOLDER_LOCAL       = 0, /* don't use this module's symbols when resolving others */
+  SOLDER_GLOBAL      = 1, /* use this module's symbols when resolving others */
+  SOLDER_NOW         = 2, /* finalize loading before dlopen() returns */
+  SOLDER_LAZY        = 4, /* finalize loading only after dlsym() is called */
+  SOLDER_NO_AUTOLOAD = 8, /* don't automatically load dependencies */
 };
 
 typedef struct solder_export {
@@ -46,6 +48,10 @@ int solder_init(const int flags);
 void solder_quit(void);
 /* returns the `flags` value with which library was initialized, or 0 if it wasn't */
 int solder_init_flags(void);
+/* adds a search path; search paths are searched in reverse order, starting with `.` */
+int solder_add_search_path(const char *path);
+/* clear search paths */
+void solder_clear_search_paths(void);
 
 /* these function mostly the same as the equivalent dlfcn stuff */
 

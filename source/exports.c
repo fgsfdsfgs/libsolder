@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <float.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <assert.h>
 #include <elf.h>
 
@@ -185,7 +186,7 @@ _error:
 /* 
    default export table; this exists both to prevent these symbols from being stripped and to provide
    a default set of exports in case the user decides to use SOLDER_NO_NRO_EXPORTS
-   this is the bare minimum necessary to run testlib_cpp with local libstdc++
+   this is the bare minimum necessary to run testlib_cpp with local libstdc++ and a bunch of extras
    if you want to go the "link libstdc++ to main" route, you'll have to provide many C++ exports instead
 */
 
@@ -237,6 +238,9 @@ const solder_export_t solder_default_exports[] __attribute__((used)) = {
   SOLDER_EXPORT_SYMBOL(stat),
   SOLDER_EXPORT_SYMBOL(lstat),
 
+  SOLDER_EXPORT_SYMBOL(getcwd),
+  SOLDER_EXPORT_SYMBOL(chdir),
+
   SOLDER_EXPORT_SYMBOL(malloc),
   SOLDER_EXPORT_SYMBOL(free),
   SOLDER_EXPORT_SYMBOL(calloc),
@@ -271,6 +275,18 @@ const solder_export_t solder_default_exports[] __attribute__((used)) = {
   SOLDER_EXPORT_SYMBOL(strtof),
   SOLDER_EXPORT_SYMBOL(strtoul),
   SOLDER_EXPORT_SYMBOL(strxfrm),
+
+  SOLDER_EXPORT_SYMBOL(atoi),
+  SOLDER_EXPORT_SYMBOL(atol),
+  SOLDER_EXPORT_SYMBOL(atoll),
+
+  SOLDER_EXPORT_SYMBOL(time),
+  SOLDER_EXPORT_SYMBOL(mktime),
+  SOLDER_EXPORT_SYMBOL(difftime),
+  SOLDER_EXPORT_SYMBOL(asctime),
+  SOLDER_EXPORT_SYMBOL(ctime),
+  SOLDER_EXPORT_SYMBOL(clock),
+  SOLDER_EXPORT_SYMBOL(clock_gettime),
 
   SOLDER_EXPORT_SYMBOL(wcrtomb),
   SOLDER_EXPORT_SYMBOL(wcscoll),

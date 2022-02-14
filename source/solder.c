@@ -54,6 +54,8 @@ void solder_quit(void) {
 
   so_unload_all();
 
+  solder_clear_search_paths();
+
   init_flags = 0;
 
   solder_dlerror(); // clear error flag

@@ -4,9 +4,9 @@
 #include <stdio.h>
 
 #ifdef DEBUG
-#define DEBUG_PRINTF(fmt, ...) fprintf(stderr, fmt, __VA_ARGS__)
+#define DEBUG_PRINTF(...) fprintf(stderr, __VA_ARGS__)
 #else
-#define DEBUG_PRINTF(fmt, ...)
+#define DEBUG_PRINTF(...)
 #endif
 
 #define ALIGN_MEM(x, align) (((x) + ((align) - 1)) & ~((align) - 1))

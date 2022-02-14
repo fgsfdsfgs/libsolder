@@ -4,6 +4,7 @@
 #include <switch.h>
 #include <string.h>
 #include <malloc.h>
+#include <limits.h>
 #include <elf.h>
 
 #include "solder.h"
@@ -56,6 +57,12 @@ typedef struct dynmod {
   struct dynmod *prev;
 } dynmod_t;
 
+// module search path, excluding cwd
+static struct searchpath {
+  char *path;
+  struct searchpath *next;
+} *so_searchlist = NULL;
+
 // the main module is the head and is never unloaded
 extern int _start;
 extern const int _DYNAMIC;
@@ -66,6 +73,8 @@ static dynmod_t so_list = {
   // we're already all done
   .flags = MOD_MAPPED | MOD_RELOCATED | MOD_INITIALIZED,
 };
+
+static int so_num_modules = 0;
 
 static dynmod_t *so_load(const char *filename, const char *modname) {
   size_t so_size = 0;
@@ -80,7 +89,17 @@ static dynmod_t *so_load(const char *filename, const char *modname) {
     return NULL;
   }
 
+  // try cwd, then all search paths
+  char tmppath[PATH_MAX] = { 0 };
   FILE *fd = fopen(filename, "rb");
+  struct searchpath *spath = so_searchlist;
+  while (spath && !fd) {
+    snprintf(tmppath, sizeof(tmppath), "%s/%s", spath->path, filename);
+    fd = fopen(tmppath, "rb");
+    if (fd) DEBUG_PRINTF("`%s`: found at `%s`\n", modname, tmppath);
+    spath = spath->next;
+  }
+
   if (fd == NULL) {
     set_error("Could not open `%s`", filename);
     free(mod);
@@ -216,6 +235,7 @@ static dynmod_t *so_load(const char *filename, const char *modname) {
 
   mod->name = ustrdup(modname);
   mod->flags |= MOD_MAPPED;
+  so_num_modules++;
 
   free(ehdr); // don't need this no more
 
@@ -279,7 +299,7 @@ static inline void *so_lookup(const char *symname) {
   return NULL;
 }
 
-static inline int so_process_relocs(dynmod_t *mod, const Elf64_Rela *rels, const size_t num_rels) {
+static inline int so_process_relocs(dynmod_t *mod, const Elf64_Rela *rels, const size_t num_rels, const int imports_only) {
   int num_failed = 0;
 
   for (size_t j = 0; j < num_rels; j++) {
@@ -300,9 +320,12 @@ static inline int so_process_relocs(dynmod_t *mod, const Elf64_Rela *rels, const
           DEBUG_PRINTF("`%s`: resolution failed for `%s`\n", mod->name, symname);
           ++num_failed;
         }
-      } else { 
+      } else {
+        if (imports_only) continue;
         symval = sym->st_value;
       }
+    } else if (imports_only) {
+      continue;
     }
 
     switch (type) {
@@ -326,7 +349,7 @@ static inline int so_process_relocs(dynmod_t *mod, const Elf64_Rela *rels, const
   return num_failed;
 }
 
-static int so_relocate(dynmod_t *mod) {
+static int so_relocate(dynmod_t *mod, const int ignore_undef, const int imports_only) {
   Elf64_Rela *rela = NULL;
   Elf64_Rela *jmprel = NULL;
   uint32_t pltrel = 0;
@@ -359,16 +382,20 @@ static int so_relocate(dynmod_t *mod) {
 
   if (rela && relasz) {
     DEBUG_PRINTF("`%s`: processing RELA@%p size %lu\n", mod->name, rela, relasz);
-    if (so_process_relocs(mod, rela, relasz / sizeof(Elf64_Rela)))
-      return -1;
+    // if there are any unresolved imports, bail unless it's the final relocation pass
+    if (so_process_relocs(mod, rela, relasz / sizeof(Elf64_Rela), imports_only))
+      if (!ignore_undef)
+        return -1;
   }
 
   if (jmprel && pltrelsz && pltrel) {
     // TODO: support DT_REL
     if (pltrel == DT_RELA) {
       DEBUG_PRINTF("`%s`: processing JMPREL@%p size %lu\n", mod->name, jmprel, pltrelsz);
-      if (so_process_relocs(mod, jmprel, pltrelsz / sizeof(Elf64_Rela)))
-        return -1;
+      // if there are any unresolved imports, bail unless it's the final relocation pass
+      if (so_process_relocs(mod, jmprel, pltrelsz / sizeof(Elf64_Rela), imports_only))
+        if (!ignore_undef)
+          return -1;
     } else {
       DEBUG_PRINTF("`%s`: DT_JMPREL has unsupported type %08x\n", mod->name, pltrel);
     }
@@ -440,6 +467,7 @@ static int so_unload(dynmod_t *mod) {
     free(mod->hashtab);
   }
 
+  so_num_modules--;
   DEBUG_PRINTF("`%s`: unloaded\n", mod->name);
 
   // free everything else
@@ -467,8 +495,8 @@ static void so_unlink(dynmod_t *mod) {
   mod->prev = NULL;
 }
 
-static int so_relocate_and_init(dynmod_t *mod) {
-  if (!(mod->flags & MOD_RELOCATED) && so_relocate(mod))
+static int so_relocate_and_init(dynmod_t *mod, int ignore_undef) {
+  if (!(mod->flags & MOD_RELOCATED) && so_relocate(mod, ignore_undef, 0))
     return -1;
   if (!(mod->flags & MOD_INITIALIZED))
     so_initialize(mod);
@@ -476,19 +504,29 @@ static int so_relocate_and_init(dynmod_t *mod) {
   return 0;
 }
 
-static void so_relocate_and_init_all(void) {
+static void so_relocate_and_init_all(int ignore_undef) {
+  DEBUG_PRINTF("so_relocate_and_init_all(): processing %d loaded modules\n", so_num_modules);
+
+  int not_relocated = 0;
+
+  DEBUG_PRINTF("* relocating modules\n");
   for (dynmod_t *p = so_list.next; p; p = p->next) {
     if (!(p->flags & MOD_RELOCATED)) {
-      if (so_relocate(p))
-        DEBUG_PRINTF("so_relocate_and_init_all(): could not relocate `%s` yet\n", p->name);
-      else
-        DEBUG_PRINTF("so_relocate_and_init_all(): relocated `%s`\n", p->name);
+      if (so_relocate(p, ignore_undef, 0)) {
+        DEBUG_PRINTF("* could not relocate `%s` yet\n", p->name);
+        not_relocated++;
+      } else {
+        DEBUG_PRINTF("* relocated `%s`\n", p->name);
+      }
     }
   }
 
+  if (not_relocated)
+    DEBUG_PRINTF("* warning: %d modules not relocated\n", not_relocated);
+
   for (dynmod_t *p = so_list.next; p; p = p->next) {
     if ((p->flags & MOD_RELOCATED) && !(p->flags & MOD_INITIALIZED)) {
-      DEBUG_PRINTF("so_relocate_and_init_all(): initializing `%s`\n", p->name);
+      DEBUG_PRINTF("* initializing `%s`\n", p->name);
       so_initialize(p);
     }
   }
@@ -518,6 +556,10 @@ static void so_dep_scan(dynmod_t *mod);
 static dynmod_t *so_dep_load(dynmod_t *parent, const char *depname) {
   dynmod_t *mod = NULL;
 
+  // chop off path, if any
+  char *slash = strrchr(depname, '/');
+  if (slash) depname = slash + 1;
+
   // see if the module is already loaded and just increase refcount if it is
   for (dynmod_t *p = so_list.next; p; p = p->next) {
     if (!strcmp(p->name, depname)) {
@@ -535,16 +577,6 @@ static dynmod_t *so_dep_load(dynmod_t *parent, const char *depname) {
 
   DEBUG_PRINTF("so_dep_load(%s, %s): trying `%s`\n", parent->name, depname, depname);
   mod = so_load(depname, depname);
-  if (!mod) {
-    // can't get it; chop off path and try working directory
-    char *slash = strrchr(depname, '/');
-    if (slash) {
-      ++slash;
-      DEBUG_PRINTF("so_dep_load(%s, %s): trying `%s`\n", parent->name, depname, slash);
-      mod = so_load(slash, depname);
-    }
-  }
-
   if (mod) {
     mod->flags |= SOLDER_LAZY | SOLDER_GLOBAL;
     mod->refcount = 1;
@@ -591,19 +623,21 @@ static void so_dep_scan(dynmod_t *mod) {
       so_dep_load(mod, dep_modname);
     }
   }
-
-  // relocate and initialize all modules we just loaded
-  so_relocate_and_init_all();
-
-  // clear error flag
-  solder_dlerror();
 }
 
 void so_autoload(void) {
   // load main module's dependencies recursively
   so_dep_scan(&so_list);
-  // TODO: figure out if it's possible to fix undef references in main module
-  //       after it's already loaded
+  // relocate and initialize all modules we just loaded
+  so_relocate_and_init_all(solder_init_flags() & SOLDER_ALLOW_UNDEFINED);
+  // resolve imports in the main module if dynsym info is available
+  if (so_list.dynstrtab && so_list.dynsym) {
+    DEBUG_PRINTF("so_autoload(): patching main module imports\n");
+    so_relocate(&so_list, 1, 1);
+  }
+  DEBUG_PRINTF("so_autoload(): autoloaded %d deps\n", so_num_modules);
+  // clear error flag
+  solder_dlerror();
 }
 
 /* libsolder API begins */
@@ -628,9 +662,16 @@ void *solder_dlopen(const char *fname, int flags) {
   mod = so_load(fname, fname);
   if (!mod) return NULL;
 
+  // load its dependencies if allowed
+  if (!(flags & SOLDER_NO_AUTOLOAD)) {
+    so_dep_scan(mod);
+    // relocate everything that was just loaded
+    so_relocate_and_init_all(0);
+  }
+
   // relocate and init it right away if not lazy
   if (!(flags & SOLDER_LAZY)) {
-    if (so_relocate_and_init(mod)) {
+    if (so_relocate_and_init(mod, 0)) {
       so_unload(mod);
       return NULL;
     }
@@ -638,9 +679,6 @@ void *solder_dlopen(const char *fname, int flags) {
 
   mod->flags |= flags;
   mod->refcount = 1;
-
-  // load its dependencies
-  so_dep_scan(mod);
 
   return mod;
 }
@@ -673,7 +711,7 @@ void *solder_dlsym(void *__restrict handle, const char *__restrict symname) {
   for (; mod; mod = mod->next) {
     if (!(mod->flags & MOD_RELOCATED)) {
       // module isn't ready yet; try to finalize it
-      if (so_relocate_and_init(mod)) {
+      if (so_relocate_and_init(mod, 0)) {
         so_unload(mod);
         if (handle)
           return NULL;
@@ -825,4 +863,30 @@ int solder_hook_function(void *__restrict handle, const char *__restrict symname
   *(uint64_t *)(srcaddr + 2) = (uint64_t)dstaddr;
 
   return 0;
+}
+
+int solder_add_search_path(const char *path) {
+  const size_t pathlen = strlen(path) + 1;
+  struct searchpath *p = calloc(1, sizeof(*p) + pathlen);
+  if (!p) {
+    set_error("Could not allocate memory for search path `%s`", path);
+    return -1;
+  }
+
+  p->path = (char *)p + sizeof(*p);
+  p->next = so_searchlist;
+  so_searchlist = p;
+  memcpy(p->path, path, pathlen);
+
+  return 0;
+}
+
+void solder_clear_search_paths(void) {
+  struct searchpath *p = so_searchlist;
+  while (p) {
+    struct searchpath *next = p->next;
+    free(p);
+    p = next;
+  }
+  so_searchlist = NULL;
 }
