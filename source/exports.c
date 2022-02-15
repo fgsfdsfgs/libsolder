@@ -227,6 +227,7 @@ const solder_export_t solder_default_exports[] __attribute__((used)) = {
   SOLDER_EXPORT_SYMBOL(fileno),
   SOLDER_EXPORT_SYMBOL(ungetwc),
   SOLDER_EXPORT_SYMBOL(ungetc),
+  SOLDER_EXPORT_SYMBOL(rewind),
 
   SOLDER_EXPORT("getwc", &fgetwc), // getwc is a macro
   SOLDER_EXPORT("putwc", &fputwc), // putwc is a macro
@@ -275,6 +276,7 @@ const solder_export_t solder_default_exports[] __attribute__((used)) = {
   SOLDER_EXPORT_SYMBOL(strtof),
   SOLDER_EXPORT_SYMBOL(strtoul),
   SOLDER_EXPORT_SYMBOL(strxfrm),
+  SOLDER_EXPORT_SYMBOL(strspn),
 
   SOLDER_EXPORT_SYMBOL(atoi),
   SOLDER_EXPORT_SYMBOL(atol),
