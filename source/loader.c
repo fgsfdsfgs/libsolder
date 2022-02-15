@@ -53,6 +53,13 @@ typedef struct dynmod {
   int (** fini_array)(void);
   size_t num_fini;
 
+  void *readtp_virtbase;
+  void *readtp_base;
+  size_t readtp_size;
+
+  int tls_offset;
+  int tls_size;
+
   struct dynmod *next;
   struct dynmod *prev;
 } dynmod_t;
@@ -74,7 +81,18 @@ static dynmod_t so_list = {
   .flags = MOD_MAPPED | MOD_RELOCATED | MOD_INITIALIZED,
 };
 
+// total modules loaded
 static int so_num_modules = 0;
+
+// space for the modules' TLS is allocated from the main module's TLS
+// this is a massive hack, but without modifying libnx there isn't much else
+static int so_tls_start = 0;
+static int so_tls_size = 0;
+static int so_tls_offset = 0;
+
+// overridable TLS buffer, so we'd know where to put our crap
+__attribute__((weak)) __thread uint8_t __solder_tls_buffer[0x10000];
+__attribute__((weak)) uint32_t __solder_tls_buffer_size = sizeof(__solder_tls_buffer);
 
 static dynmod_t *so_load(const char *filename, const char *modname) {
   size_t so_size = 0;
@@ -258,7 +276,7 @@ err_free_so:
   return NULL;
 }
 
-static inline const Elf64_Sym *so_lookup_in_module(const dynmod_t *mod, const char *symname) {
+static inline const Elf64_Sym *so_lookup_sym(const dynmod_t *mod, const char *symname) {
   if (!mod || !mod->dynsym || !mod->dynstrtab)
     return NULL;
   // if hashtab is available, use that for lookup, otherwise do linear search
@@ -272,7 +290,15 @@ static inline const Elf64_Sym *so_lookup_in_module(const dynmod_t *mod, const ch
   return NULL;
 }
 
-static inline const Elf64_Sym *so_reverse_lookup_in_module(const dynmod_t *mod, const void *addr) {
+static inline void *so_lookup(const dynmod_t *mod, const char *symname) {
+  const Elf64_Sym *sym = so_lookup_sym(mod, symname);
+  if (sym && sym->st_shndx != SHN_UNDEF)
+    return (uint8_t *)mod->load_virtbase + sym->st_value;
+  else
+    return NULL;
+}
+
+static inline const Elf64_Sym *so_reverse_lookup_sym(const dynmod_t *mod, const void *addr) {
   if (!(mod->flags & MOD_RELOCATED) || !mod->dynsym || mod->num_dynsym <= 1)
     return NULL;
   // skip mandatory UNDEF
@@ -286,12 +312,12 @@ static inline const Elf64_Sym *so_reverse_lookup_in_module(const dynmod_t *mod, 
   return NULL;
 }
 
-static inline void *so_lookup(const char *symname) {
+static inline void *so_lookup_global(const char *symname) {
   if (!symname || !*symname)
     return NULL;
   const dynmod_t *mod = &so_list;
   while (mod) {
-    const Elf64_Sym *sym = so_lookup_in_module(mod, symname);
+    const Elf64_Sym *sym = so_lookup_sym(mod, symname);
     if (sym && sym->st_shndx != SHN_UNDEF)
       return (void *)((uintptr_t)mod->load_virtbase + sym->st_value);
     mod = mod->next;
@@ -314,7 +340,13 @@ static inline int so_process_relocs(dynmod_t *mod, const Elf64_Rela *rels, const
       const Elf64_Sym *sym = &mod->dynsym[symno];
       if (sym->st_shndx == SHN_UNDEF) {
         const char *symname = mod->dynstrtab + sym->st_name;
-        symval = (uintptr_t)so_lookup(symname);
+        // HACK: patch references to __aarch64_read_tp if this is it and we have a replacement
+        if (mod->readtp_virtbase && !strcmp(symname, "__aarch64_read_tp")) {
+          symval = (uintptr_t)mod->readtp_virtbase;
+          DEBUG_PRINTF("`%s`: patching ref to `%s` at %p to %p\n", mod->name, symname, ptr, (void *)symval);
+        } else {
+          symval = (uintptr_t)so_lookup_global(symname);
+        }
         symbase = 0; // symbol is somewhere else
         if (!symval) {
           DEBUG_PRINTF("`%s`: resolution failed for `%s`\n", mod->name, symname);
@@ -349,12 +381,150 @@ static inline int so_process_relocs(dynmod_t *mod, const Elf64_Rela *rels, const
   return num_failed;
 }
 
+static int so_generate_readtp(dynmod_t *mod) {
+  // one page should be enough
+  mod->readtp_base = memalign(ALIGN_PAGE, ALIGN_PAGE);
+  if (!mod->readtp_base) {
+    set_error("`%s`: Could allocate page for __aarch64_read_tp", mod->name);
+    return -1;
+  }
+
+  // fill it in
+  uint32_t *dst = (uint32_t *)mod->readtp_base;
+  dst[0] = 0x180000A9; // 00 ldr w9, #0x14
+  dst[1] = 0xD53BD060; // 04 mrs x0, tpidrro_el0
+  dst[2] = 0xF940FC00; // 08 ldr x0, [x0, #0x1f8]
+  dst[3] = 0x8B090000; // 0C add x0, x0, x9
+  dst[4] = 0xD65F03C0; // 10 ret
+  dst[5] = (uint32_t)(so_tls_start + mod->tls_offset);
+  dst[6] = 0x00000000; // just in case
+
+  // get a page of virtual address space and immediately map it
+
+  Result rc = 0;
+  Handle self = envGetOwnProcessHandle();
+  mod->readtp_virtbase = NULL;
+
+  virtmemLock();
+  mod->readtp_size = ALIGN_PAGE;
+  mod->readtp_virtbase = virtmemFindCodeMemory(mod->readtp_size, ALIGN_PAGE);
+  rc = svcMapProcessCodeMemory(self, (u64)mod->readtp_virtbase, (u64)mod->readtp_base, mod->readtp_size);
+  if (R_SUCCEEDED(rc))
+     rc = svcSetProcessMemoryPermission(self, (u64)mod->readtp_virtbase, mod->readtp_size, Perm_Rx);
+  virtmemUnlock();
+
+  if (R_FAILED(rc)) {
+    set_error("`%s`: Could not map page for __aarch64_read_tp: %08lx", mod->name, rc);
+    svcUnmapProcessCodeMemory(self, (u64)mod->readtp_virtbase, (u64)mod->readtp_base, mod->readtp_size);
+    free(mod->readtp_base);
+    mod->readtp_base = NULL;
+    mod->readtp_virtbase = NULL;
+    return -2;
+  }
+
+  return 0;
+}
+
+extern void *__aarch64_read_tp(void);
+
+static int so_alloc_tls(dynmod_t *mod) {
+  uint8_t *tls_base = __aarch64_read_tp();
+
+  // if the size is not set, set up our shitty allocator
+  if (so_tls_size == 0) {
+    so_tls_start = __solder_tls_buffer - tls_base; // start of allocable space
+    so_tls_size = __solder_tls_buffer_size;
+    if (so_tls_size < 0) so_tls_size = 0;
+    so_tls_offset = 0;
+    DEBUG_PRINTF("`%s`: available TLS space: %d bytes, start %d\n", mod->name, so_tls_size, so_tls_start);
+  }
+
+  // check if the module has any TLS at all
+  uint8_t *mod_tls_start = so_lookup(mod, "__tls_start");
+  uint8_t *mod_tls_end = so_lookup(mod, "__tls_end");
+  const int mod_tls_size = mod_tls_end - mod_tls_start;
+  if (!mod_tls_start || !mod_tls_end || mod_tls_size <= 0) {
+    DEBUG_PRINTF("`%s`: no TLS\n", mod->name);
+    return 0;
+  }
+
+  if (so_tls_size == 0 || so_tls_offset >= so_tls_size) {
+    set_error("`%s`: Main module has no TLS space", mod->name);
+    return -1; // no space left
+  }
+
+  uint8_t *mod_tdata_start = so_lookup(mod, "__tdata_lma");
+  uint8_t *mod_tdata_end = so_lookup(mod, "__tdata_lma_end");
+  const int mod_tdata_size = mod_tdata_end - mod_tdata_start;
+  const int mod_tls_size_aligned = ALIGN_MEM(mod_tls_size, 16); // align it just in case
+
+  if (so_tls_offset + mod_tls_size_aligned > so_tls_size) {
+    set_error("`%s`: Not enough space in main module's TLS (%d left, %d needed)", mod->name, so_tls_offset, mod_tls_size_aligned);
+    return -2;
+  }
+
+  DEBUG_PRINTF("`%s`: module TLS size: %d total, %d data, offset %d\n", mod->name, mod_tls_size, mod_tdata_size, so_tls_offset);
+
+  // set up the TLS block
+  // TODO: this will return this thread's TLS pointer, so spawning modules from threads will probably explode
+  if (!tls_base) {
+    DEBUG_PRINTF("`%s`: read_tp returned NULL!\n", mod->name);
+    return -3;
+  }
+
+  // initialize the block
+  uint8_t *dst = tls_base + so_tls_start + so_tls_offset;
+  const int zero_size = mod_tls_size_aligned - mod_tdata_size;
+  if (mod_tdata_size)
+    memcpy(dst, mod_tdata_start, mod_tdata_size);
+  memset(dst + mod_tdata_size, 0, zero_size);
+
+  // generate a patched version of __aarch64_read_tp that adds the offset to our block
+  if (so_generate_readtp(mod))
+    return -4;
+
+  mod->tls_offset = so_tls_offset;
+  mod->tls_size = mod_tls_size_aligned;
+
+  DEBUG_PRINTF("`%s`: base TLS: %p, module TLS: %p\n", mod->name, tls_base, dst);
+
+  so_tls_offset += mod_tls_size_aligned;
+
+  return 0;
+}
+
+static void so_free_tls(dynmod_t *mod) {
+  if (mod->tls_size != 0 && mod->tls_offset) {
+    DEBUG_PRINTF("`%s`: freeing %d bytes of TLS at offset %d\n", mod->name, mod->tls_size, mod->tls_offset);
+    if (mod->tls_offset == so_tls_offset)
+      so_tls_offset -= mod->tls_size;
+    mod->tls_size = 0;
+    mod->tls_offset = 0;
+  }
+
+  if (mod->readtp_virtbase) {
+    svcUnmapProcessCodeMemory(envGetOwnProcessHandle(), (u64)mod->readtp_virtbase, (u64)mod->readtp_base, mod->readtp_size);
+    mod->readtp_virtbase = NULL;
+  }
+
+  if (mod->readtp_base) {
+    free(mod->readtp_base);
+    mod->readtp_base = NULL;
+  }
+
+  mod->readtp_size = 0;
+}
+
 static int so_relocate(dynmod_t *mod, const int ignore_undef, const int imports_only) {
   Elf64_Rela *rela = NULL;
   Elf64_Rela *jmprel = NULL;
   uint32_t pltrel = 0;
   size_t relasz = 0;
   size_t pltrelsz = 0;
+
+  // allocate space in the main module's TLS for this module's TLS, if needed
+  if (!mod->tls_size && !imports_only)
+    so_alloc_tls(mod);
 
   // find RELA and JMPREL
   for (Elf64_Dyn *dyn = mod->dynamic; dyn->d_tag != DT_NULL; dyn++) {
@@ -437,6 +607,9 @@ static int so_unload(dynmod_t *mod) {
   // execute destructors, if any
   if (mod->flags & MOD_INITIALIZED)
     so_finalize(mod);
+
+  // free TLS block
+  so_free_tls(mod);
 
   DEBUG_PRINTF("`%s`: unmapping\n", mod->name);
 
@@ -594,11 +767,11 @@ static dynmod_t *so_dep_load(dynmod_t *parent, const char *depname) {
 
 static void so_dep_scan(dynmod_t *mod) {
   if (!mod || !mod->dynamic) {
-    DEBUG_PRINTF("so_dep_scan(%s): NULL dynamic\n", mod ? mod->name : "(null)");
+    DEBUG_PRINTF("`%s`: NULL dynamic\n", mod ? mod->name : "(null)");
     return;
   }
 
-  DEBUG_PRINTF("so_dep_scan(%s): scanning for deps\n", mod->name);
+  DEBUG_PRINTF("`%s`: scanning for deps\n", mod->name);
 
   const Elf64_Dyn *dyn = mod->dynamic;
 
@@ -612,7 +785,7 @@ static void so_dep_scan(dynmod_t *mod) {
   }
 
   if (strtab == NULL) {
-    DEBUG_PRINTF("so_dep_scan(%s): could not find strtab\n", mod->name);
+    DEBUG_PRINTF("`%s`: could not find strtab\n", mod->name);
     return;
   }
 
@@ -731,7 +904,7 @@ void *solder_dlsym(void *__restrict handle, const char *__restrict symname) {
       }
     }
 
-    const Elf64_Sym *sym = so_lookup_in_module(mod, symname);
+    const Elf64_Sym *sym = so_lookup_sym(mod, symname);
     if (sym) return (void *)((uintptr_t)mod->load_virtbase + sym->st_value);
 
     // stop early if we're searching in a specific module
@@ -760,7 +933,7 @@ int solder_dladdr(void *addr, solder_dl_info_t *info) {
   const Elf64_Sym *sym = NULL;
   const dynmod_t *mod;
   for (mod = so_list.next; mod; mod = mod->next) {
-    sym = so_reverse_lookup_in_module(mod, addr);
+    sym = so_reverse_lookup_sym(mod, addr);
     if (sym) {
       info->dli_fname = mod->name;
       info->dli_fbase = mod->load_virtbase;
@@ -772,7 +945,7 @@ int solder_dladdr(void *addr, solder_dl_info_t *info) {
 
   // do main module last
   mod = &so_list;
-  sym = so_reverse_lookup_in_module(mod, addr);
+  sym = so_reverse_lookup_sym(mod, addr);
   if (sym) {
     info->dli_fname = mod->name;
     info->dli_fbase = mod->load_virtbase;
