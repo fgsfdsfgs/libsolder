@@ -15,47 +15,16 @@
 #include <assert.h>
 #include <elf.h>
 
+#include "common.h"
 #include "solder.h"
 #include "util.h"
 #include "exports.h"
 
-uint32_t elf_hash(const uint8_t *name) {
-  uint64_t h = 0, g;
-  while (*name) {
-    h = (h << 4) + *name++;
-    if ((g = (h & 0xf0000000)) != 0)
-      h ^= g >> 24;
-    h &= 0x0fffffff;
-  }
-  return h;
-}
-
-const Elf64_Sym *elf_hashtab_lookup(
-  const char *strtab,
-  const Elf64_Sym *symtab,
-  const uint32_t *hashtab,
-  const char *symname
-) {
-    const uint32_t hash = elf_hash((const uint8_t *)symname);
-    const uint32_t nbucket = hashtab[0];
-    const uint32_t *bucket = &hashtab[2];
-    const uint32_t *chain = &bucket[nbucket];
-    const uint32_t bucketidx = hash % nbucket;
-    for (uint32_t i = bucket[bucketidx]; i; i = chain[i]) {
-      if (!strcmp(symname, strtab + symtab[i].st_name))
-        return symtab + i;
-    }
-    return NULL;
-}
-
-int symtab_from_nro(
+int solder_symtab_from_nro(
   Elf64_Sym **out_symtab,
   char **out_strtab,
   uint32_t **out_hashtab
 ) {
-  extern const int _DYNAMIC;
-  extern const int _start;
-
   const uintptr_t base = (uintptr_t)&_start;
   const Elf64_Dyn *dyn = (const void *)&_DYNAMIC;
   Elf64_Sym *symtab = NULL;
@@ -96,14 +65,13 @@ int symtab_from_nro(
   return 0;
 }
 
-int symtab_from_exports(
+int solder_symtab_from_exports(
   const solder_export_t *exp,
   const int numexp,
   Elf64_Sym **out_symtab,
   char **out_strtab,
   uint32_t **out_hashtab
 ) {
-  extern const int _start;
   const uintptr_t base = (uintptr_t)&_start;
   const uint32_t nchain = numexp + 1; // + NULL symbol
   const uint32_t nbucket = nchain * 2 + 1; // FIXME: is this even right
@@ -158,7 +126,7 @@ int symtab_from_exports(
   // fill hash table
   for (Elf64_Word i = 0; i < nchain; ++i) {
     const char *symname = strtab + symtab[i].st_name;
-    const uint32_t h = elf_hash((const uint8_t *)symname);
+    const uint32_t h = solder_elf_hash((const uint8_t *)symname);
     const uint32_t n = h % nbucket;
     if (bucket[n] == STN_UNDEF) {
       bucket[n] = i;
@@ -181,6 +149,35 @@ _error:
   free(symtab);
   free(strtab);
   return -1;
+}
+
+int solder_set_main_exports(const solder_export_t *exp, const int numexp) {
+  Elf64_Sym *symtab = NULL;
+  uint32_t *hashtab = NULL;
+  char *strtab = NULL;
+
+  if (exp != NULL) {
+    // if we got a custom export table, turn it into a symtab and use it
+    if (solder_symtab_from_exports(exp, numexp, &symtab, &strtab, &hashtab) == 0)
+      solder_dsolist.flags |= MOD_OWN_SYMTAB; // to free it later
+  }
+
+  // otherwise, or if the generator died for some reason, try to use the NRO's symtab
+  // this requires the NRO to have been built with -rdynamic
+  if (symtab == NULL) solder_symtab_from_nro(&symtab, &strtab, &hashtab);
+
+  // if it's still missing, bail
+  if (symtab == NULL) return -1;
+
+  solder_dsolist.num_dynsym = hashtab[1]; // nchain == number of symbols
+  solder_dsolist.dynsym = symtab;
+  solder_dsolist.hashtab = hashtab;
+  solder_dsolist.dynstrtab = strtab;
+
+  // we now have symbols for other libs to use, so we need to mark ourselves as GLOBAL
+  solder_dsolist.flags |= SOLDER_GLOBAL;
+
+  return 0;
 }
 
 /* 

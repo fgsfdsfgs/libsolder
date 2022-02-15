@@ -1,100 +1,21 @@
-#include <stdlib.h>
 #include <stdio.h>
-#include <stdint.h>
-#include <switch.h>
 #include <string.h>
 #include <malloc.h>
 #include <limits.h>
-#include <elf.h>
 
+#include "common.h"
 #include "solder.h"
 #include "util.h"
 #include "exports.h"
-
-enum dynmod_flags_internal {
-  // states
-  MOD_RELOCATED   = 1 << 17,
-  MOD_MAPPED      = 1 << 18,
-  MOD_INITIALIZED = 1 << 19,
-  // additional flags
-  MOD_OWN_SYMTAB  = 1 << 24,
-};
-
-typedef struct dynmod_seg {
-  void *base;
-  void *virtbase;
-  size_t size;
-  u64 pflags;
-} dynmod_seg_t;
-
-typedef struct dynmod {
-  char *name;
-  int flags;
-  int refcount;
-
-  void *load_base;
-  void *load_virtbase;
-  VirtmemReservation *load_memrv;
-  size_t load_size;
-
-  dynmod_seg_t *segs;
-  size_t num_segs;
-
-  Elf64_Dyn *dynamic;
-  Elf64_Sym *dynsym;
-  size_t num_dynsym;
-
-  char *dynstrtab;
-  uint32_t *hashtab;
-
-  int (** init_array)(void);
-  size_t num_init;
-
-  int (** fini_array)(void);
-  size_t num_fini;
-
-  void *readtp_virtbase;
-  void *readtp_base;
-  size_t readtp_size;
-
-  int tls_offset;
-  int tls_size;
-
-  struct dynmod *next;
-  struct dynmod *prev;
-} dynmod_t;
-
-// module search path, excluding cwd
-static struct searchpath {
-  char *path;
-  struct searchpath *next;
-} *so_searchlist = NULL;
-
-// the main module is the head and is never unloaded
-extern int _start;
-extern const int _DYNAMIC;
-static dynmod_t so_list = {
-  "$main",
-  .load_virtbase = (void *)&_start,
-  .dynamic = (Elf64_Dyn *)&_DYNAMIC,
-  // we're already all done
-  .flags = MOD_MAPPED | MOD_RELOCATED | MOD_INITIALIZED,
-};
+#include "lookup.h"
+#include "reloc.h"
+#include "tls.h"
+#include "loader.h"
 
 // total modules loaded
 static int so_num_modules = 0;
 
-// space for the modules' TLS is allocated from the main module's TLS
-// this is a massive hack, but without modifying libnx there isn't much else
-static int so_tls_start = 0;
-static int so_tls_size = 0;
-static int so_tls_offset = 0;
-
-// overridable TLS buffer, so we'd know where to put our crap
-__attribute__((weak)) __thread uint8_t __solder_tls_buffer[0x10000];
-__attribute__((weak)) uint32_t __solder_tls_buffer_size = sizeof(__solder_tls_buffer);
-
-static dynmod_t *so_load(const char *filename, const char *modname) {
+dynmod_t *solder_dso_load(const char *filename, const char *modname) {
   size_t so_size = 0;
   Elf64_Ehdr *ehdr = NULL;
   Elf64_Phdr *phdr = NULL;
@@ -103,14 +24,14 @@ static dynmod_t *so_load(const char *filename, const char *modname) {
 
   dynmod_t *mod = calloc(1, sizeof(dynmod_t));
   if (!mod) {
-    set_error("Could not allocate dynmod header");
+    solder_set_error("Could not allocate dynmod header");
     return NULL;
   }
 
   // try cwd, then all search paths
   char tmppath[PATH_MAX] = { 0 };
   FILE *fd = fopen(filename, "rb");
-  struct searchpath *spath = so_searchlist;
+  struct searchpath *spath = solder_searchlist;
   while (spath && !fd) {
     snprintf(tmppath, sizeof(tmppath), "%s/%s", spath->path, filename);
     fd = fopen(tmppath, "rb");
@@ -119,7 +40,7 @@ static dynmod_t *so_load(const char *filename, const char *modname) {
   }
 
   if (fd == NULL) {
-    set_error("Could not open `%s`", filename);
+    solder_set_error("Could not open `%s`", filename);
     free(mod);
     return NULL;
   }
@@ -132,7 +53,7 @@ static dynmod_t *so_load(const char *filename, const char *modname) {
 
   ehdr = memalign(ALIGN_PAGE, so_size);
   if (!ehdr) {
-    set_error("Could not allocate %lu bytes for `%s`", so_size, filename);
+    solder_set_error("Could not allocate %lu bytes for `%s`", so_size, filename);
     fclose(fd);
     free(mod);
     return NULL;
@@ -142,7 +63,7 @@ static dynmod_t *so_load(const char *filename, const char *modname) {
   fclose(fd);
 
   if (memcmp(ehdr, ELFMAG, SELFMAG) != 0) {
-    set_error("`%s` is not a valid ELF file", filename);
+    solder_set_error("`%s` is not a valid ELF file", filename);
     goto err_free_so;
   }
 
@@ -171,7 +92,7 @@ static dynmod_t *so_load(const char *filename, const char *modname) {
   // collect segments
   mod->segs = calloc(mod->num_segs, sizeof(*mod->segs));
   if (!mod->segs) {
-    set_error("Could not allocate space for `%s`'s segment table", filename);
+    solder_set_error("Could not allocate space for `%s`'s segment table", filename);
     goto err_free_load;
   }
   for (size_t i = 0, n = 0; i < ehdr->e_phnum; i++) {
@@ -184,7 +105,7 @@ static dynmod_t *so_load(const char *filename, const char *modname) {
       // create an aligned copy of the segment
       mod->segs[n].base = memalign(ALIGN_PAGE, mod->segs[n].size);
       if (!mod->segs[n].base) {
-        set_error("Could not allocate `%lu` bytes for segment %lu\n", mod->segs[n].size, n);
+        solder_set_error("Could not allocate `%lu` bytes for segment %lu\n", mod->segs[n].size, n);
         goto err_free_load;
       }
       // fill it in
@@ -206,7 +127,7 @@ static dynmod_t *so_load(const char *filename, const char *modname) {
   mod->load_base = mod->segs[0].base;
 
   if (!mod->dynamic) {
-    set_error("`%s` doesn't have a DYNAMIC segment", filename);
+    solder_set_error("`%s` doesn't have a DYNAMIC segment", filename);
     goto err_free_load;
   }
 
@@ -231,7 +152,7 @@ static dynmod_t *so_load(const char *filename, const char *modname) {
   }
 
   if (mod->dynsym == NULL || mod->dynstrtab == NULL) {
-    set_error("No symbol information in `%s`", filename);
+    solder_set_error("No symbol information in `%s`", filename);
     goto err_free_load;
   }
 
@@ -241,17 +162,17 @@ static dynmod_t *so_load(const char *filename, const char *modname) {
   for (size_t i = 0; i < mod->num_segs; ++i) {
     rc = svcMapProcessCodeMemory(self, (u64)mod->segs[i].virtbase, (u64)mod->segs[i].base, mod->segs[i].size);
     if (R_FAILED(rc)) {
-      set_error("`%s`: svcMapProcessCodeMemory failed on seg %lu:\n%08x", mod->name, i, rc);
+      solder_set_error("`%s`: svcMapProcessCodeMemory failed on seg %lu:\n%08x", mod->name, i, rc);
       goto err_free_unmap;
     }
     rc = svcSetProcessMemoryPermission(self, (u64)mod->segs[i].virtbase, mod->segs[i].size, mod->segs[i].pflags);
     if (R_FAILED(rc)) {
-      set_error("`%s`: svcSetProcessMemoryPermission failed on seg %lu:\n%08x", mod->name, i, rc);
+      solder_set_error("`%s`: svcSetProcessMemoryPermission failed on seg %lu:\n%08x", mod->name, i, rc);
       goto err_free_unmap;
     }
   }
 
-  mod->name = ustrdup(modname);
+  mod->name = solder_strdup(modname);
   mod->flags |= MOD_MAPPED;
   so_num_modules++;
 
@@ -276,307 +197,7 @@ err_free_so:
   return NULL;
 }
 
-static inline const Elf64_Sym *so_lookup_sym(const dynmod_t *mod, const char *symname) {
-  if (!mod || !mod->dynsym || !mod->dynstrtab)
-    return NULL;
-  // if hashtab is available, use that for lookup, otherwise do linear search
-  if (mod->hashtab)
-    return elf_hashtab_lookup(mod->dynstrtab, mod->dynsym, mod->hashtab, symname);
-  // sym 0 is always UNDEF
-  for (size_t i = 1; i < mod->num_dynsym; ++i) {
-    if (!strcmp(symname, mod->dynstrtab + mod->dynsym[i].st_name))
-      return mod->dynsym + i;
-  }
-  return NULL;
-}
-
-static inline void *so_lookup(const dynmod_t *mod, const char *symname) {
-  const Elf64_Sym *sym = so_lookup_sym(mod, symname);
-  if (sym && sym->st_shndx != SHN_UNDEF)
-    return (uint8_t *)mod->load_virtbase + sym->st_value;
-  else
-    return NULL;
-}
-
-static inline const Elf64_Sym *so_reverse_lookup_sym(const dynmod_t *mod, const void *addr) {
-  if (!(mod->flags & MOD_RELOCATED) || !mod->dynsym || mod->num_dynsym <= 1)
-    return NULL;
-  // skip mandatory UNDEF
-  for (size_t i = 1; i < mod->num_dynsym; ++i) {
-    if (mod->dynsym[i].st_shndx != SHN_UNDEF && mod->dynsym[i].st_value) {
-      const uintptr_t symaddr = mod->dynsym[i].st_value + (uintptr_t)mod->load_virtbase;
-      if (symaddr == (uintptr_t)addr)
-        return mod->dynsym + i;
-    }
-  }
-  return NULL;
-}
-
-static inline void *so_lookup_global(const char *symname) {
-  if (!symname || !*symname)
-    return NULL;
-  const dynmod_t *mod = &so_list;
-  while (mod) {
-    const Elf64_Sym *sym = so_lookup_sym(mod, symname);
-    if (sym && sym->st_shndx != SHN_UNDEF)
-      return (void *)((uintptr_t)mod->load_virtbase + sym->st_value);
-    mod = mod->next;
-  }
-  return NULL;
-}
-
-static inline int so_process_relocs(dynmod_t *mod, const Elf64_Rela *rels, const size_t num_rels, const int imports_only) {
-  int num_failed = 0;
-
-  for (size_t j = 0; j < num_rels; j++) {
-    uintptr_t *ptr = (uintptr_t *)((uintptr_t)mod->load_virtbase + rels[j].r_offset);
-    const uintptr_t symno = ELF64_R_SYM(rels[j].r_info);
-    const int type = ELF64_R_TYPE(rels[j].r_info);
-    uintptr_t symval = 0;
-    uintptr_t symbase = (uintptr_t)mod->load_virtbase;
-
-    if (symno) {
-      // if the reloc refers to a symbol, get the symbol value in there
-      const Elf64_Sym *sym = &mod->dynsym[symno];
-      if (sym->st_shndx == SHN_UNDEF) {
-        const char *symname = mod->dynstrtab + sym->st_name;
-        // HACK: patch references to __aarch64_read_tp if this is it and we have a replacement
-        if (mod->readtp_virtbase && !strcmp(symname, "__aarch64_read_tp")) {
-          symval = (uintptr_t)mod->readtp_virtbase;
-          DEBUG_PRINTF("`%s`: patching ref to `%s` at %p to %p\n", mod->name, symname, ptr, (void *)symval);
-        } else {
-          symval = (uintptr_t)so_lookup_global(symname);
-        }
-        symbase = 0; // symbol is somewhere else
-        if (!symval) {
-          DEBUG_PRINTF("`%s`: resolution failed for `%s`\n", mod->name, symname);
-          ++num_failed;
-        }
-      } else {
-        if (imports_only) continue;
-        symval = sym->st_value;
-      }
-    } else if (imports_only) {
-      continue;
-    }
-
-    switch (type) {
-      case R_AARCH64_RELATIVE:
-        // sometimes the value of r_addend is also at *ptr
-        *ptr = symbase + rels[j].r_addend;
-        break;
-      case R_AARCH64_ABS64:
-      case R_AARCH64_GLOB_DAT:
-      case R_AARCH64_JUMP_SLOT:
-        *ptr = symval + rels[j].r_addend;
-        break;
-      case R_AARCH64_NONE:
-        break; // sorry nothing
-      default:
-        set_error("`%s`: Unknown relocation type: %x", mod->name, type);
-        return -1;
-    }
-  }
-
-  return num_failed;
-}
-
-static int so_generate_readtp(dynmod_t *mod) {
-  // one page should be enough
-  mod->readtp_base = memalign(ALIGN_PAGE, ALIGN_PAGE);
-  if (!mod->readtp_base) {
-    set_error("`%s`: Could allocate page for __aarch64_read_tp", mod->name);
-    return -1;
-  }
-
-  // fill it in
-  uint32_t *dst = (uint32_t *)mod->readtp_base;
-  dst[0] = 0x180000A9; // 00 ldr w9, #0x14
-  dst[1] = 0xD53BD060; // 04 mrs x0, tpidrro_el0
-  dst[2] = 0xF940FC00; // 08 ldr x0, [x0, #0x1f8]
-  dst[3] = 0x8B090000; // 0C add x0, x0, x9
-  dst[4] = 0xD65F03C0; // 10 ret
-  dst[5] = (uint32_t)(so_tls_start + mod->tls_offset);
-  dst[6] = 0x00000000; // just in case
-
-  // get a page of virtual address space and immediately map it
-
-  Result rc = 0;
-  Handle self = envGetOwnProcessHandle();
-  mod->readtp_virtbase = NULL;
-
-  virtmemLock();
-  mod->readtp_size = ALIGN_PAGE;
-  mod->readtp_virtbase = virtmemFindCodeMemory(mod->readtp_size, ALIGN_PAGE);
-  rc = svcMapProcessCodeMemory(self, (u64)mod->readtp_virtbase, (u64)mod->readtp_base, mod->readtp_size);
-  if (R_SUCCEEDED(rc))
-     rc = svcSetProcessMemoryPermission(self, (u64)mod->readtp_virtbase, mod->readtp_size, Perm_Rx);
-  virtmemUnlock();
-
-  if (R_FAILED(rc)) {
-    set_error("`%s`: Could not map page for __aarch64_read_tp: %08lx", mod->name, rc);
-    svcUnmapProcessCodeMemory(self, (u64)mod->readtp_virtbase, (u64)mod->readtp_base, mod->readtp_size);
-    free(mod->readtp_base);
-    mod->readtp_base = NULL;
-    mod->readtp_virtbase = NULL;
-    return -2;
-  }
-
-  return 0;
-}
-
-extern void *__aarch64_read_tp(void);
-
-static int so_alloc_tls(dynmod_t *mod) {
-  uint8_t *tls_base = __aarch64_read_tp();
-
-  // if the size is not set, set up our shitty allocator
-  if (so_tls_size == 0) {
-    so_tls_start = __solder_tls_buffer - tls_base; // start of allocable space
-    so_tls_size = __solder_tls_buffer_size;
-    if (so_tls_size < 0) so_tls_size = 0;
-    so_tls_offset = 0;
-    DEBUG_PRINTF("`%s`: available TLS space: %d bytes, start %d\n", mod->name, so_tls_size, so_tls_start);
-  }
-
-  // check if the module has any TLS at all
-  uint8_t *mod_tls_start = so_lookup(mod, "__tls_start");
-  uint8_t *mod_tls_end = so_lookup(mod, "__tls_end");
-  const int mod_tls_size = mod_tls_end - mod_tls_start;
-  if (!mod_tls_start || !mod_tls_end || mod_tls_size <= 0) {
-    DEBUG_PRINTF("`%s`: no TLS\n", mod->name);
-    return 0;
-  }
-
-  if (so_tls_size == 0 || so_tls_offset >= so_tls_size) {
-    set_error("`%s`: Main module has no TLS space", mod->name);
-    return -1; // no space left
-  }
-
-  uint8_t *mod_tdata_start = so_lookup(mod, "__tdata_lma");
-  uint8_t *mod_tdata_end = so_lookup(mod, "__tdata_lma_end");
-  const int mod_tdata_size = mod_tdata_end - mod_tdata_start;
-  const int mod_tls_size_aligned = ALIGN_MEM(mod_tls_size, 16); // align it just in case
-
-  if (so_tls_offset + mod_tls_size_aligned > so_tls_size) {
-    set_error("`%s`: Not enough space in main module's TLS (%d left, %d needed)", mod->name, so_tls_offset, mod_tls_size_aligned);
-    return -2;
-  }
-
-  DEBUG_PRINTF("`%s`: module TLS size: %d total, %d data, offset %d\n", mod->name, mod_tls_size, mod_tdata_size, so_tls_offset);
-
-  // set up the TLS block
-  // TODO: this will return this thread's TLS pointer, so spawning modules from threads will probably explode
-  if (!tls_base) {
-    DEBUG_PRINTF("`%s`: read_tp returned NULL!\n", mod->name);
-    return -3;
-  }
-
-  // initialize the block
-  uint8_t *dst = tls_base + so_tls_start + so_tls_offset;
-  const int zero_size = mod_tls_size_aligned - mod_tdata_size;
-  if (mod_tdata_size)
-    memcpy(dst, mod_tdata_start, mod_tdata_size);
-  memset(dst + mod_tdata_size, 0, zero_size);
-
-  // generate a patched version of __aarch64_read_tp that adds the offset to our block
-  if (so_generate_readtp(mod))
-    return -4;
-
-  mod->tls_offset = so_tls_offset;
-  mod->tls_size = mod_tls_size_aligned;
-
-  DEBUG_PRINTF("`%s`: base TLS: %p, module TLS: %p\n", mod->name, tls_base, dst);
-
-  so_tls_offset += mod_tls_size_aligned;
-
-  return 0;
-}
-
-static void so_free_tls(dynmod_t *mod) {
-  if (mod->tls_size != 0 && mod->tls_offset) {
-    DEBUG_PRINTF("`%s`: freeing %d bytes of TLS at offset %d\n", mod->name, mod->tls_size, mod->tls_offset);
-    if (mod->tls_offset == so_tls_offset)
-      so_tls_offset -= mod->tls_size;
-    mod->tls_size = 0;
-    mod->tls_offset = 0;
-  }
-
-  if (mod->readtp_virtbase) {
-    svcUnmapProcessCodeMemory(envGetOwnProcessHandle(), (u64)mod->readtp_virtbase, (u64)mod->readtp_base, mod->readtp_size);
-    mod->readtp_virtbase = NULL;
-  }
-
-  if (mod->readtp_base) {
-    free(mod->readtp_base);
-    mod->readtp_base = NULL;
-  }
-
-  mod->readtp_size = 0;
-}
-
-static int so_relocate(dynmod_t *mod, const int ignore_undef, const int imports_only) {
-  Elf64_Rela *rela = NULL;
-  Elf64_Rela *jmprel = NULL;
-  uint32_t pltrel = 0;
-  size_t relasz = 0;
-  size_t pltrelsz = 0;
-
-  // allocate space in the main module's TLS for this module's TLS, if needed
-  if (!mod->tls_size && !imports_only)
-    so_alloc_tls(mod);
-
-  // find RELA and JMPREL
-  for (Elf64_Dyn *dyn = mod->dynamic; dyn->d_tag != DT_NULL; dyn++) {
-    switch (dyn->d_tag) {
-      case DT_RELA:
-        rela = (Elf64_Rela *)(mod->load_virtbase + dyn->d_un.d_ptr);
-        break;
-      case DT_RELASZ:
-        relasz = dyn->d_un.d_val;
-        break;
-      case DT_JMPREL:
-        // TODO: don't assume RELA
-        jmprel = (Elf64_Rela *)(mod->load_virtbase + dyn->d_un.d_ptr);
-        break;
-      case DT_PLTREL:
-        pltrel = dyn->d_un.d_val;
-        break;
-      case DT_PLTRELSZ:
-        pltrelsz = dyn->d_un.d_val;
-        break;
-      default:
-        break;
-    }
-  }
-
-  if (rela && relasz) {
-    DEBUG_PRINTF("`%s`: processing RELA@%p size %lu\n", mod->name, rela, relasz);
-    // if there are any unresolved imports, bail unless it's the final relocation pass
-    if (so_process_relocs(mod, rela, relasz / sizeof(Elf64_Rela), imports_only))
-      if (!ignore_undef)
-        return -1;
-  }
-
-  if (jmprel && pltrelsz && pltrel) {
-    // TODO: support DT_REL
-    if (pltrel == DT_RELA) {
-      DEBUG_PRINTF("`%s`: processing JMPREL@%p size %lu\n", mod->name, jmprel, pltrelsz);
-      // if there are any unresolved imports, bail unless it's the final relocation pass
-      if (so_process_relocs(mod, jmprel, pltrelsz / sizeof(Elf64_Rela), imports_only))
-        if (!ignore_undef)
-          return -1;
-    } else {
-      DEBUG_PRINTF("`%s`: DT_JMPREL has unsupported type %08x\n", mod->name, pltrel);
-    }
-  }
-
-  mod->flags |= MOD_RELOCATED;
-
-  return 0;
-}
-
-static void so_initialize(dynmod_t *mod) {
+static void dso_initialize(dynmod_t *mod) {
   if (mod->init_array) {
     DEBUG_PRINTF("`%s`: init array %p has %lu entries\n", mod->name, mod->init_array, mod->num_init);
     for (size_t i = 0; i < mod->num_init; ++i)
@@ -586,7 +207,7 @@ static void so_initialize(dynmod_t *mod) {
   mod->flags |= MOD_INITIALIZED;
 }
 
-static void so_finalize(dynmod_t *mod) {
+static void dso_finalize(dynmod_t *mod) {
   if (mod->fini_array) {
     DEBUG_PRINTF("`%s`: fini array %p has %lu entries\n", mod->name, mod->fini_array, mod->num_fini);
     for (size_t i = 0; i < mod->num_fini; ++i)
@@ -598,7 +219,135 @@ static void so_finalize(dynmod_t *mod) {
   mod->flags &= ~MOD_INITIALIZED;
 }
 
-static int so_unload(dynmod_t *mod) {
+static void dso_link(dynmod_t *mod) {
+  mod->next = solder_dsolist.next;
+  mod->prev = &solder_dsolist;
+  if (solder_dsolist.next)
+    solder_dsolist.next->prev = mod;
+  solder_dsolist.next = mod;
+}
+
+static void dso_unlink(dynmod_t *mod) {
+  if (mod->prev)
+    mod->prev->next = mod->next;
+  if (mod->next)
+    mod->next->prev = mod->prev;
+  mod->next = NULL;
+  mod->prev = NULL;
+}
+
+static int dso_relocate_and_init(dynmod_t *mod, int ignore_undef) {
+  if (!(mod->flags & MOD_RELOCATED) && solder_relocate(mod, ignore_undef, 0))
+    return -1;
+  if (!(mod->flags & MOD_INITIALIZED))
+    dso_initialize(mod);
+  dso_link(mod);
+  return 0;
+}
+
+static void dso_relocate_and_init_all(int ignore_undef) {
+  DEBUG_PRINTF("dso_relocate_and_init_all(): processing %d loaded modules\n", so_num_modules);
+
+  int not_relocated = 0;
+
+  DEBUG_PRINTF("* relocating modules\n");
+  for (dynmod_t *p = solder_dsolist.next; p; p = p->next) {
+    if (!(p->flags & MOD_RELOCATED)) {
+      if (solder_relocate(p, ignore_undef, 0)) {
+        DEBUG_PRINTF("* could not relocate `%s` yet\n", p->name);
+        not_relocated++;
+      } else {
+        DEBUG_PRINTF("* relocated `%s`\n", p->name);
+      }
+    }
+  }
+
+  if (not_relocated)
+    DEBUG_PRINTF("* warning: %d modules not relocated\n", not_relocated);
+
+  for (dynmod_t *p = solder_dsolist.next; p; p = p->next) {
+    if ((p->flags & MOD_RELOCATED) && !(p->flags & MOD_INITIALIZED)) {
+      DEBUG_PRINTF("* initializing `%s`\n", p->name);
+      dso_initialize(p);
+    }
+  }
+}
+
+static void dep_scan(dynmod_t *mod);
+
+static dynmod_t *dep_load(dynmod_t *parent, const char *depname) {
+  dynmod_t *mod = NULL;
+
+  // chop off path, if any
+  char *slash = strrchr(depname, '/');
+  if (slash) depname = slash + 1;
+
+  // see if the module is already loaded and just increase refcount if it is
+  for (dynmod_t *p = solder_dsolist.next; p; p = p->next) {
+    if (!strcmp(p->name, depname)) {
+      mod = p;
+      break;
+    }
+  }
+
+  if (mod) {
+    DEBUG_PRINTF("dep_load(%s, %s): `%s` already loaded\n", parent->name, depname, mod->name);
+    mod->refcount++;
+    mod->flags |= SOLDER_GLOBAL;
+    return mod;
+  }
+
+  DEBUG_PRINTF("dep_load(%s, %s): trying `%s`\n", parent->name, depname, depname);
+  mod = solder_dso_load(depname, depname);
+  if (mod) {
+    mod->flags |= SOLDER_LAZY | SOLDER_GLOBAL;
+    mod->refcount = 1;
+    dso_link(mod); // link it early
+    dep_scan(mod); // scan it for deps
+  } else {
+    DEBUG_PRINTF("dep_load(%s, %s): failed to find dep\n", parent->name, depname);
+  }
+
+  // clear error flag
+  solder_dlerror();
+
+  return mod;
+}
+
+static void dep_scan(dynmod_t *mod) {
+  if (!mod || !mod->dynamic) {
+    DEBUG_PRINTF("`%s`: NULL dynamic\n", mod ? mod->name : "(null)");
+    return;
+  }
+
+  DEBUG_PRINTF("`%s`: scanning for deps\n", mod->name);
+
+  const Elf64_Dyn *dyn = mod->dynamic;
+
+  // find strtab
+  const char *strtab = NULL;
+  for (; dyn->d_tag != DT_NULL; dyn++) {
+    if (dyn->d_tag == DT_STRTAB) {
+      strtab = (const char *)(mod->load_virtbase + dyn->d_un.d_ptr);
+      break;
+    }
+  }
+
+  if (strtab == NULL) {
+    DEBUG_PRINTF("`%s`: could not find strtab\n", mod->name);
+    return;
+  }
+
+  // find all DT_NEEDED modules and start loading them
+  for (dyn = mod->dynamic; dyn->d_tag != DT_NULL; dyn++) {
+    if (dyn->d_tag == DT_NEEDED) {
+      const char *dep_modname = strtab + dyn->d_un.d_val;
+      dep_load(mod, dep_modname);
+    }
+  }
+}
+
+int solder_dso_unload(dynmod_t *mod) {
   if (mod->load_base == NULL)
     return -1;
 
@@ -606,10 +355,10 @@ static int so_unload(dynmod_t *mod) {
 
   // execute destructors, if any
   if (mod->flags & MOD_INITIALIZED)
-    so_finalize(mod);
+    dso_finalize(mod);
 
   // free TLS block
-  so_free_tls(mod);
+  solder_tls_free(mod);
 
   DEBUG_PRINTF("`%s`: unmapping\n", mod->name);
 
@@ -651,164 +400,36 @@ static int so_unload(dynmod_t *mod) {
   return 0;
 }
 
-static void so_link(dynmod_t *mod) {
-  mod->next = so_list.next;
-  mod->prev = &so_list;
-  if (so_list.next)
-    so_list.next->prev = mod;
-  so_list.next = mod;
-}
-
-static void so_unlink(dynmod_t *mod) {
-  if (mod->prev)
-    mod->prev->next = mod->next;
-  if (mod->next)
-    mod->next->prev = mod->prev;
-  mod->next = NULL;
-  mod->prev = NULL;
-}
-
-static int so_relocate_and_init(dynmod_t *mod, int ignore_undef) {
-  if (!(mod->flags & MOD_RELOCATED) && so_relocate(mod, ignore_undef, 0))
-    return -1;
-  if (!(mod->flags & MOD_INITIALIZED))
-    so_initialize(mod);
-  so_link(mod);
-  return 0;
-}
-
-static void so_relocate_and_init_all(int ignore_undef) {
-  DEBUG_PRINTF("so_relocate_and_init_all(): processing %d loaded modules\n", so_num_modules);
-
-  int not_relocated = 0;
-
-  DEBUG_PRINTF("* relocating modules\n");
-  for (dynmod_t *p = so_list.next; p; p = p->next) {
-    if (!(p->flags & MOD_RELOCATED)) {
-      if (so_relocate(p, ignore_undef, 0)) {
-        DEBUG_PRINTF("* could not relocate `%s` yet\n", p->name);
-        not_relocated++;
-      } else {
-        DEBUG_PRINTF("* relocated `%s`\n", p->name);
-      }
-    }
-  }
-
-  if (not_relocated)
-    DEBUG_PRINTF("* warning: %d modules not relocated\n", not_relocated);
-
-  for (dynmod_t *p = so_list.next; p; p = p->next) {
-    if ((p->flags & MOD_RELOCATED) && !(p->flags & MOD_INITIALIZED)) {
-      DEBUG_PRINTF("* initializing `%s`\n", p->name);
-      so_initialize(p);
-    }
-  }
-}
-
-void so_unload_all(void) {
-  dynmod_t *mod = so_list.next;
-  so_list.next = NULL;
+void solder_unload_all(void) {
+  dynmod_t *mod = solder_dsolist.next;
+  solder_dsolist.next = NULL;
 
   while (mod) {
     dynmod_t *next = mod->next;
-    so_unload(mod);
+    solder_dso_unload(mod);
     mod = next;
   }
 
   // clear main module's exports if needed
-  if (so_list.flags & MOD_OWN_SYMTAB) {
-    free(so_list.dynsym); so_list.dynsym = NULL;
-    free(so_list.dynstrtab); so_list.dynstrtab = NULL;
-    free(so_list.hashtab); so_list.hashtab = NULL;
-    so_list.flags &= ~MOD_OWN_SYMTAB;
+  if (solder_dsolist.flags & MOD_OWN_SYMTAB) {
+    free(solder_dsolist.dynsym); solder_dsolist.dynsym = NULL;
+    free(solder_dsolist.dynstrtab); solder_dsolist.dynstrtab = NULL;
+    free(solder_dsolist.hashtab); solder_dsolist.hashtab = NULL;
+    solder_dsolist.flags &= ~MOD_OWN_SYMTAB;
   }
 }
 
-static void so_dep_scan(dynmod_t *mod);
-
-static dynmod_t *so_dep_load(dynmod_t *parent, const char *depname) {
-  dynmod_t *mod = NULL;
-
-  // chop off path, if any
-  char *slash = strrchr(depname, '/');
-  if (slash) depname = slash + 1;
-
-  // see if the module is already loaded and just increase refcount if it is
-  for (dynmod_t *p = so_list.next; p; p = p->next) {
-    if (!strcmp(p->name, depname)) {
-      mod = p;
-      break;
-    }
-  }
-
-  if (mod) {
-    DEBUG_PRINTF("so_dep_load(%s, %s): `%s` already loaded\n", parent->name, depname, mod->name);
-    mod->refcount++;
-    mod->flags |= SOLDER_GLOBAL;
-    return mod;
-  }
-
-  DEBUG_PRINTF("so_dep_load(%s, %s): trying `%s`\n", parent->name, depname, depname);
-  mod = so_load(depname, depname);
-  if (mod) {
-    mod->flags |= SOLDER_LAZY | SOLDER_GLOBAL;
-    mod->refcount = 1;
-    so_link(mod); // link it early
-    so_dep_scan(mod); // scan it for deps
-  } else {
-    DEBUG_PRINTF("so_dep_load(%s, %s): failed to find dep\n", parent->name, depname);
-  }
-
-  // clear error flag
-  solder_dlerror();
-
-  return mod;
-}
-
-static void so_dep_scan(dynmod_t *mod) {
-  if (!mod || !mod->dynamic) {
-    DEBUG_PRINTF("`%s`: NULL dynamic\n", mod ? mod->name : "(null)");
-    return;
-  }
-
-  DEBUG_PRINTF("`%s`: scanning for deps\n", mod->name);
-
-  const Elf64_Dyn *dyn = mod->dynamic;
-
-  // find strtab
-  const char *strtab = NULL;
-  for (; dyn->d_tag != DT_NULL; dyn++) {
-    if (dyn->d_tag == DT_STRTAB) {
-      strtab = (const char *)(mod->load_virtbase + dyn->d_un.d_ptr);
-      break;
-    }
-  }
-
-  if (strtab == NULL) {
-    DEBUG_PRINTF("`%s`: could not find strtab\n", mod->name);
-    return;
-  }
-
-  // find all DT_NEEDED modules and start loading them
-  for (dyn = mod->dynamic; dyn->d_tag != DT_NULL; dyn++) {
-    if (dyn->d_tag == DT_NEEDED) {
-      const char *dep_modname = strtab + dyn->d_un.d_val;
-      so_dep_load(mod, dep_modname);
-    }
-  }
-}
-
-void so_autoload(void) {
+void solder_autoload(void) {
   // load main module's dependencies recursively
-  so_dep_scan(&so_list);
+  dep_scan(&solder_dsolist);
   // relocate and initialize all modules we just loaded
-  so_relocate_and_init_all(solder_init_flags() & SOLDER_ALLOW_UNDEFINED);
+  dso_relocate_and_init_all(solder_init_flags() & SOLDER_ALLOW_UNDEFINED);
   // resolve imports in the main module if dynsym info is available
-  if (so_list.dynstrtab && so_list.dynsym) {
-    DEBUG_PRINTF("so_autoload(): patching main module imports\n");
-    so_relocate(&so_list, 1, 1);
+  if (solder_dsolist.dynstrtab && solder_dsolist.dynsym) {
+    DEBUG_PRINTF("solder_autoload(): patching main module imports\n");
+    solder_relocate(&solder_dsolist, 1, 1);
   }
-  DEBUG_PRINTF("so_autoload(): autoloaded %d deps\n", so_num_modules);
+  DEBUG_PRINTF("solder_autoload(): autoloaded %d deps\n", so_num_modules);
   // clear error flag
   solder_dlerror();
 }
@@ -819,7 +440,7 @@ void *solder_dlopen(const char *fname, int flags) {
   dynmod_t *mod = NULL;
 
   // see if the module is already loaded and just increase refcount if it is
-  for (dynmod_t *p = so_list.next; p; p = p->next) {
+  for (dynmod_t *p = solder_dsolist.next; p; p = p->next) {
     if (!strcmp(p->name, fname)) {
       mod = p;
       break;
@@ -832,20 +453,20 @@ void *solder_dlopen(const char *fname, int flags) {
   }
 
   // load the module
-  mod = so_load(fname, fname);
+  mod = solder_dso_load(fname, fname);
   if (!mod) return NULL;
 
   // load its dependencies if allowed
   if (!(flags & SOLDER_NO_AUTOLOAD)) {
-    so_dep_scan(mod);
+    dep_scan(mod);
     // relocate everything that was just loaded
-    so_relocate_and_init_all(0);
+    dso_relocate_and_init_all(0);
   }
 
   // relocate and init it right away if not lazy
   if (!(flags & SOLDER_LAZY)) {
-    if (so_relocate_and_init(mod, 0)) {
-      so_unload(mod);
+    if (dso_relocate_and_init(mod, 0)) {
+      solder_dso_unload(mod);
       return NULL;
     }
   }
@@ -858,7 +479,7 @@ void *solder_dlopen(const char *fname, int flags) {
 
 int solder_dlclose(void *handle) {
   if (!handle) {
-    set_error("dlclose(): NULL handle");
+    solder_set_error("dlclose(): NULL handle");
     return -1;
   }
 
@@ -866,8 +487,8 @@ int solder_dlclose(void *handle) {
   // free the module when reference count reaches zero
   if (--mod->refcount <= 0) {
     DEBUG_PRINTF("`%s`: refcount is 0, unloading\n", mod->name);
-    so_unlink(mod);
-    return so_unload(mod);
+    dso_unlink(mod);
+    return solder_dso_unload(mod);
   }
 
   return 0;
@@ -875,17 +496,17 @@ int solder_dlclose(void *handle) {
 
 void *solder_dlsym(void *__restrict handle, const char *__restrict symname) {
   if (!symname || symname[0] == '\0') {
-    set_error("dlsym(): empty symname");
+    solder_set_error("dlsym(): empty symname");
     return NULL;
   }
 
   // NULL handle means search in order starting with the main module
-  dynmod_t *mod = handle ? handle : &so_list;
+  dynmod_t *mod = handle ? handle : &solder_dsolist;
   for (; mod; mod = mod->next) {
     if (!(mod->flags & MOD_RELOCATED)) {
       // module isn't ready yet; try to finalize it
-      if (so_relocate_and_init(mod, 0)) {
-        so_unload(mod);
+      if (dso_relocate_and_init(mod, 0)) {
+        solder_dso_unload(mod);
         if (handle)
           return NULL;
         else
@@ -896,7 +517,7 @@ void *solder_dlsym(void *__restrict handle, const char *__restrict symname) {
     // module has no exports
     if (!mod->dynsym || mod->num_dynsym <= 1) {
       if (handle) {
-        set_error("`%s`: no exports available", mod->name);
+        solder_set_error("`%s`: no exports available", mod->name);
         return NULL;
       } else {
         // continue searching if we're not searching in a specific lib
@@ -904,23 +525,23 @@ void *solder_dlsym(void *__restrict handle, const char *__restrict symname) {
       }
     }
 
-    const Elf64_Sym *sym = so_lookup_sym(mod, symname);
+    const Elf64_Sym *sym = solder_lookup_sym(mod, symname);
     if (sym) return (void *)((uintptr_t)mod->load_virtbase + sym->st_value);
 
     // stop early if we're searching in a specific module
     if (handle) {
-      set_error("`%s`: symbol `%s` not found", mod->name, symname);
+      solder_set_error("`%s`: symbol `%s` not found", mod->name, symname);
       return NULL;
     }
   }
 
-  set_error("symbol `%s` not found in any loaded modules", symname);
+  solder_set_error("symbol `%s` not found in any loaded modules", symname);
   return NULL;
 }
 
 int solder_dladdr(void *addr, solder_dl_info_t *info) {
   if (!addr || !info) {
-    set_error("solder_dladdr(): NULL args\n");
+    solder_set_error("solder_dladdr(): NULL args\n");
     return 0;
   }
 
@@ -932,8 +553,8 @@ int solder_dladdr(void *addr, solder_dl_info_t *info) {
   // start with the first loaded module after main, since someone's unlikely to be looking for symbol names inside main
   const Elf64_Sym *sym = NULL;
   const dynmod_t *mod;
-  for (mod = so_list.next; mod; mod = mod->next) {
-    sym = so_reverse_lookup_sym(mod, addr);
+  for (mod = solder_dsolist.next; mod; mod = mod->next) {
+    sym = solder_reverse_lookup_sym(mod, addr);
     if (sym) {
       info->dli_fname = mod->name;
       info->dli_fbase = mod->load_virtbase;
@@ -944,8 +565,8 @@ int solder_dladdr(void *addr, solder_dl_info_t *info) {
   }
 
   // do main module last
-  mod = &so_list;
-  sym = so_reverse_lookup_sym(mod, addr);
+  mod = &solder_dsolist;
+  sym = solder_reverse_lookup_sym(mod, addr);
   if (sym) {
     info->dli_fname = mod->name;
     info->dli_fbase = mod->load_virtbase;
@@ -957,38 +578,9 @@ int solder_dladdr(void *addr, solder_dl_info_t *info) {
   return 0;
 }
 
-int solder_set_main_exports(const solder_export_t *exp, const int numexp) {
-  Elf64_Sym *symtab = NULL;
-  uint32_t *hashtab = NULL;
-  char *strtab = NULL;
-
-  if (exp != NULL) {
-    // if we got a custom export table, turn it into a symtab and use it
-    if (symtab_from_exports(exp, numexp, &symtab, &strtab, &hashtab) == 0)
-      so_list.flags |= MOD_OWN_SYMTAB; // to free it later
-  }
-
-  // otherwise, or if the generator died for some reason, try to use the NRO's symtab
-  // this requires the NRO to have been built with -rdynamic
-  if (symtab == NULL) symtab_from_nro(&symtab, &strtab, &hashtab);
-
-  // if it's still missing, bail
-  if (symtab == NULL) return -1;
-
-  so_list.num_dynsym = hashtab[1]; // nchain == number of symbols
-  so_list.dynsym = symtab;
-  so_list.hashtab = hashtab;
-  so_list.dynstrtab = strtab;
-
-  // we now have symbols for other libs to use, so we need to mark ourselves as GLOBAL
-  so_list.flags |= SOLDER_GLOBAL;
-
-  return 0;
-}
-
 void *solder_get_data_addr(void *handle) {
   if (!handle) {
-    set_error("get_data_addr(): NULL handle");
+    solder_set_error("solder_get_data_addr(): NULL handle");
     return NULL;
   }
 
@@ -1003,7 +595,7 @@ void *solder_get_data_addr(void *handle) {
 
 void *solder_get_text_addr(void *handle) {
   if (!handle) {
-    set_error("get_text_addr(): NULL handle");
+    solder_set_error("solder_get_text_addr(): NULL handle");
     return NULL;
   }
 
@@ -1018,13 +610,13 @@ void *solder_get_text_addr(void *handle) {
 
 int solder_hook_function(void *__restrict handle, const char *__restrict symname, void *dstaddr) {
   if (!handle) {
-    set_error("hook_function(): NULL handle");
+    solder_set_error("solder_hook_function(): NULL handle");
     return -1;
   }
 
   dynmod_t *mod = handle;
   if (mod->flags & MOD_MAPPED) {
-    set_error("`%s`: Already remapped as R/X", mod->name);
+    solder_set_error("`%s`: Already remapped as R/X", mod->name);
     return -2;
   }
 
@@ -1036,30 +628,4 @@ int solder_hook_function(void *__restrict handle, const char *__restrict symname
   *(uint64_t *)(srcaddr + 2) = (uint64_t)dstaddr;
 
   return 0;
-}
-
-int solder_add_search_path(const char *path) {
-  const size_t pathlen = strlen(path) + 1;
-  struct searchpath *p = calloc(1, sizeof(*p) + pathlen);
-  if (!p) {
-    set_error("Could not allocate memory for search path `%s`", path);
-    return -1;
-  }
-
-  p->path = (char *)p + sizeof(*p);
-  p->next = so_searchlist;
-  so_searchlist = p;
-  memcpy(p->path, path, pathlen);
-
-  return 0;
-}
-
-void solder_clear_search_paths(void) {
-  struct searchpath *p = so_searchlist;
-  while (p) {
-    struct searchpath *next = p->next;
-    free(p);
-    p = next;
-  }
-  so_searchlist = NULL;
 }
