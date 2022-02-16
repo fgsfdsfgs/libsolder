@@ -172,6 +172,8 @@ dynmod_t *solder_dso_load(const char *filename, const char *modname) {
     }
   }
 
+  DEBUG_PRINTF("`%s`: mapped to %p - %p\n", modname, mod->load_virtbase, mod->load_virtbase + mod->load_size);
+
   mod->name = solder_strdup(modname);
   mod->flags |= MOD_MAPPED;
   so_num_modules++;
