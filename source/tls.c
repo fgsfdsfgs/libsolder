@@ -12,6 +12,12 @@
 // this is a massive hack, but dynamically allocating TLS blocks would require us
 // to modify threadCreate & co
 
+// block alignment
+#define TLS_ALIGN 16
+
+// padding in between TLS blocks, just in case
+#define TLS_GUARD_SIZE TLS_ALIGN
+
 // overridable TLS buffer to generate additional space in the main module's TLS
 __attribute__((weak)) __thread uint8_t __solder_tls_buffer[0x10000];
 __attribute__((weak)) uint32_t __solder_tls_buffer_size = sizeof(__solder_tls_buffer);
@@ -23,7 +29,7 @@ static int tls_offset = 0;
 
 // generate a patched __aarch64_read_tp since all dynamic modules are built with tls-model=local-exec
 // switching to a different model seems to be impossible since it leads to devkitA64's gcc generating
-// nice memes like `bl __arch64_read_tp; add x0, x0, x0`
+// nice memes like `bl __arch64_read_tp; add x0, x0, x0` and I'm not sure if that's correct
 static int tls_generate_readtp(dynmod_t *mod) {
   // one page should be enough
   mod->readtp_base = memalign(ALIGN_PAGE, ALIGN_PAGE);
@@ -86,7 +92,7 @@ int solder_tls_alloc(dynmod_t *mod) {
   // check if the module has any TLS at all
   uint8_t *mod_tls_start = solder_lookup(mod, "__tls_start");
   uint8_t *mod_tls_end = solder_lookup(mod, "__tls_end");
-  const int mod_tls_size = mod_tls_end - mod_tls_start;
+  const int mod_tls_size = mod_tls_end - mod_tls_start + sizeof(void *); // extra space for __tls_guard
   if (!mod_tls_start || !mod_tls_end || mod_tls_size <= 0) {
     DEBUG_PRINTF("`%s`: no TLS\n", mod->name);
     return 0;
@@ -100,7 +106,7 @@ int solder_tls_alloc(dynmod_t *mod) {
   uint8_t *mod_tdata_start = solder_lookup(mod, "__tdata_lma");
   uint8_t *mod_tdata_end = solder_lookup(mod, "__tdata_lma_end");
   const int mod_tdata_size = mod_tdata_end - mod_tdata_start;
-  const int mod_tls_size_aligned = ALIGN_MEM(mod_tls_size, 16); // align it just in case
+  const int mod_tls_size_aligned = ALIGN_MEM(mod_tls_size + TLS_GUARD_SIZE, TLS_ALIGN); // pad and align it just in case
 
   if (tls_offset + mod_tls_size_aligned > tls_size) {
     solder_set_error("`%s`: Not enough space in main module's TLS (%d left, %d needed)", mod->name, tls_offset, mod_tls_size_aligned);
@@ -110,7 +116,7 @@ int solder_tls_alloc(dynmod_t *mod) {
   DEBUG_PRINTF("`%s`: module TLS size: %d total, %d data, offset %d\n", mod->name, mod_tls_size, mod_tdata_size, tls_offset);
 
   // set up the TLS block
-  // TODO: this will return this thread's TLS pointer, so spawning modules from threads will probably explode
+  // TODO: tls_base is this thread's TLS pointer, so spawning modules from threads will probably explode
   if (!tls_base) {
     DEBUG_PRINTF("`%s`: read_tp returned NULL!\n", mod->name);
     return -3;
@@ -119,16 +125,21 @@ int solder_tls_alloc(dynmod_t *mod) {
   // initialize the block
   uint8_t *dst = tls_base + tls_start + tls_offset;
   const int zero_size = mod_tls_size_aligned - mod_tdata_size;
+  // FIXME: this will only make sure .tdata gets loaded on the main thread
+  //        threadCreate will still only copy the main module's .tdata
   if (mod_tdata_size)
     memcpy(dst, mod_tdata_start, mod_tdata_size);
   memset(dst + mod_tdata_size, 0, zero_size);
 
-  // generate a patched version of __aarch64_read_tp that adds the offset to our block
-  if (tls_generate_readtp(mod))
-    return -4;
-
   mod->tls_offset = tls_offset;
   mod->tls_size = mod_tls_size_aligned;
+
+  // generate a patched version of __aarch64_read_tp that adds the offset to our block
+  if (tls_generate_readtp(mod)) {
+    mod->tls_offset = 0;
+    mod->tls_size = 0;
+    return -4;
+  }
 
   DEBUG_PRINTF("`%s`: base TLS: %p, module TLS: %p\n", mod->name, tls_base, dst);
 
