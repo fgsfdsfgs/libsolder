@@ -71,15 +71,20 @@ dynmod_t *solder_dso_load(const char *filename, const char *modname) {
   shdr = (Elf64_Shdr *)((uintptr_t)ehdr + ehdr->e_shoff);
   shstrtab = (char *)((uintptr_t)ehdr + shdr[ehdr->e_shstrndx].sh_offset);
 
-  // calculate total size of the LOAD segments
+  // calculate total size of the LOAD segments (overshoot it by a ton actually)
   // total size = size of last load segment + vaddr of last load segment
+  size_t max_align = ALIGN_PAGE;
   for (size_t i = 0; i < ehdr->e_phnum; i++) {
     if (phdr[i].p_type == PT_LOAD && phdr[i].p_memsz) {
       const size_t this_size = phdr[i].p_vaddr + phdr[i].p_memsz;
       if (this_size > mod->load_size) mod->load_size = this_size;
+      if (phdr[i].p_align > max_align) max_align = phdr[i].p_align;
       ++mod->num_segs;
     }
   }
+
+  // round up to max segment alignment
+  mod->load_size = ALIGN_MEM(mod->load_size, max_align);
 
   DEBUG_PRINTF("`%s`: total memory reserved %lu; %lu segs total\n", filename, mod->load_size, mod->num_segs);
 
@@ -100,21 +105,23 @@ dynmod_t *solder_dso_load(const char *filename, const char *modname) {
       if (phdr[i].p_flags & PF_R) mod->segs[n].pflags |= Perm_R;
       if (phdr[i].p_flags & PF_W) mod->segs[n].pflags |= Perm_W;
       if (phdr[i].p_flags & PF_X) mod->segs[n].pflags |= Perm_X;
-      mod->segs[n].size = ALIGN_MEM(phdr[i].p_memsz, ALIGN_PAGE);
+      mod->segs[n].align = (phdr[i].p_align < ALIGN_PAGE) ? ALIGN_PAGE : phdr[i].p_align;
       mod->segs[n].virtbase = (void *)((Elf64_Addr)mod->load_virtbase + phdr[i].p_vaddr);
+      mod->segs[n].virtpage = (void *)ALIGN_DN((Elf64_Addr)mod->segs[n].virtbase, mod->segs[n].align);
+      mod->segs[n].virtend = (void *)ALIGN_MEM((Elf64_Addr)mod->segs[n].virtbase + phdr[i].p_memsz, mod->segs[n].align);
+      mod->segs[n].size = (Elf64_Addr)mod->segs[n].virtend - (Elf64_Addr)mod->segs[n].virtpage;
       // create an aligned copy of the segment
-      mod->segs[n].base = memalign(ALIGN_PAGE, mod->segs[n].size);
-      if (!mod->segs[n].base) {
+      mod->segs[n].page = memalign(mod->segs[n].align, mod->segs[n].size);
+      if (!mod->segs[n].page) {
         solder_set_error("Could not allocate `%lu` bytes for segment %lu\n", mod->segs[n].size, n);
         goto err_free_load;
       }
-      // fill it in
+      const intptr_t diff = (Elf64_Addr)mod->segs[n].virtbase - (Elf64_Addr)mod->segs[n].virtpage;
+      mod->segs[n].base = (void *)((Elf64_Addr)mod->segs[n].page + diff);
+      mod->segs[n].end = mod->segs[n].page + mod->segs[n].size;
+      // zero it out and fill it in
+      memset(mod->segs[n].page, 0, mod->segs[n].size);
       memcpy(mod->segs[n].base, (void *)((uintptr_t)ehdr + phdr[i].p_offset), phdr[i].p_filesz);
-      // zero out the rest
-      if (mod->segs[n].size > phdr[i].p_filesz) {
-        const size_t zerosz = mod->segs[n].size - phdr[i].p_filesz;
-        memset(mod->segs[n].base + phdr[i].p_filesz, 0, zerosz);
-      }
       phdr[i].p_vaddr = (Elf64_Addr)mod->segs[n].virtbase;
       ++n;
     } else if (phdr[i].p_type == PT_DYNAMIC) {
@@ -148,6 +155,9 @@ dynmod_t *solder_dso_load(const char *filename, const char *modname) {
     } else if (!strcmp(sh_name, ".fini_array")) {
       mod->fini_array = (void *)((Elf64_Addr)mod->load_virtbase + shdr[i].sh_addr);
       mod->num_fini = shdr[i].sh_size / sizeof(void *);
+    } else if (!strcmp(sh_name, ".got")) {
+      mod->got = (void *)((Elf64_Addr)mod->load_virtbase + shdr[i].sh_addr);
+      mod->num_got = shdr[i].sh_size / sizeof(void *);
     }
   }
 
@@ -160,12 +170,12 @@ dynmod_t *solder_dso_load(const char *filename, const char *modname) {
   Result rc = 0;
   Handle self = envGetOwnProcessHandle();
   for (size_t i = 0; i < mod->num_segs; ++i) {
-    rc = svcMapProcessCodeMemory(self, (u64)mod->segs[i].virtbase, (u64)mod->segs[i].base, mod->segs[i].size);
+    rc = svcMapProcessCodeMemory(self, (u64)mod->segs[i].virtpage, (u64)mod->segs[i].page, mod->segs[i].size);
     if (R_FAILED(rc)) {
       solder_set_error("`%s`: svcMapProcessCodeMemory failed on seg %lu:\n%08x", mod->name, i, rc);
       goto err_free_unmap;
     }
-    rc = svcSetProcessMemoryPermission(self, (u64)mod->segs[i].virtbase, mod->segs[i].size, mod->segs[i].pflags);
+    rc = svcSetProcessMemoryPermission(self, (u64)mod->segs[i].virtpage, mod->segs[i].size, mod->segs[i].pflags);
     if (R_FAILED(rc)) {
       solder_set_error("`%s`: svcSetProcessMemoryPermission failed on seg %lu:\n%08x", mod->name, i, rc);
       goto err_free_unmap;
@@ -176,6 +186,12 @@ dynmod_t *solder_dso_load(const char *filename, const char *modname) {
 
   mod->name = solder_strdup(modname);
   mod->flags |= MOD_MAPPED;
+  mod->type = ehdr->e_type;
+  if (mod->type == ET_EXEC) {
+    mod->entry = mod->load_virtbase + ehdr->e_entry;
+    DEBUG_PRINTF("`%s`: is executable: entry at %p\n", modname, mod->entry);
+  }
+
   so_num_modules++;
 
   free(ehdr); // don't need this no more
@@ -184,13 +200,13 @@ dynmod_t *solder_dso_load(const char *filename, const char *modname) {
 
 err_free_unmap:
   for (size_t i = 0; i < mod->num_segs; ++i)
-    svcUnmapProcessCodeMemory(self, (u64)mod->segs[i].virtbase, (u64)mod->segs[i].base, mod->segs[i].size);
+    svcUnmapProcessCodeMemory(self, (u64)mod->segs[i].virtpage, (u64)mod->segs[i].page, mod->segs[i].size);
 err_free_load:
   virtmemLock();
   virtmemRemoveReservation(mod->load_memrv);
   virtmemUnlock();
   for (size_t i = 0; i < mod->num_segs; ++i)
-    free(mod->segs[i].base);
+    free(mod->segs[i].page);
 err_free_so:
   free(mod->segs);
   free(ehdr);
@@ -370,13 +386,14 @@ int solder_dso_unload(dynmod_t *mod) {
   for (size_t i = 0; i < mod->num_segs; ++i) {
     // restore permissions if needed (maybe not needed at all)
     if (mod->segs[i].pflags != Perm_Rw) {
-      rc = svcSetProcessMemoryPermission(self, (u64)mod->segs[i].virtbase, mod->segs[i].size, Perm_Rw);
+      rc = svcSetProcessMemoryPermission(self, (u64)mod->segs[i].virtpage, mod->segs[i].size, Perm_Rw);
       if (R_FAILED(rc)) DEBUG_PRINTF("* svcSetProcessMemoryPermission(seg %lu): error %08x\n", i, rc);
     }
-    rc = svcUnmapProcessCodeMemory(self, (u64)mod->segs[i].virtbase, (u64)mod->segs[i].base, mod->segs[i].size);
+    rc = svcUnmapProcessCodeMemory(self, (u64)mod->segs[i].virtpage, (u64)mod->segs[i].page, mod->segs[i].size);
     if (R_FAILED(rc)) DEBUG_PRINTF("* svcUnmapProcessCodeMemory(seg %lu): error %08x\n", i, rc);
-    free(mod->segs[i].base);
+    free(mod->segs[i].page);
     mod->segs[i].base = NULL;
+    mod->segs[i].page = NULL;
   }
 
   // release virtual address range
@@ -606,6 +623,30 @@ void *solder_get_text_addr(void *handle) {
   for (size_t i = 0; i < mod->num_segs; ++i)
     if (mod->segs[i].pflags == Perm_Rx)
       return mod->segs[i].virtbase;
+
+  return NULL;
+}
+
+void *solder_get_base_addr(void *handle) {
+  if (!handle) {
+    solder_set_error("solder_get_base_addr(): NULL handle");
+    return NULL;
+  }
+  dynmod_t *mod = handle;
+  return mod->load_virtbase;
+}
+
+void *solder_get_entry_addr(void *handle) {
+  if (!handle) {
+    solder_set_error("solder_get_entry_addr(): NULL handle");
+    return NULL;
+  }
+
+  dynmod_t *mod = handle;
+  if (mod->type == ET_EXEC)
+    return mod->entry;
+  else
+    solder_set_error("solder_get_entry_addr(): not an executable");
 
   return NULL;
 }

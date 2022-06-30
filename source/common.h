@@ -18,16 +18,23 @@ enum dynmod_flags_internal {
 };
 
 typedef struct dynmod_seg {
-  void *base;
   void *virtbase;
+  void *virtpage;
+  void *virtend;
+  void *base;
+  void *page;
+  void *end;
   size_t size;
+  size_t align;
   uint64_t pflags;
 } dynmod_seg_t;
 
 typedef struct dynmod {
   char *name;
+  Elf64_Half type;
   int flags;
   int refcount;
+  void *entry;
 
   void *load_base;
   void *load_virtbase;
@@ -44,6 +51,9 @@ typedef struct dynmod {
   char *dynstrtab;
   uint32_t *hashtab;
 
+  void **got;
+  size_t num_got;
+
   int (** init_array)(void);
   size_t num_init;
 
@@ -54,6 +64,7 @@ typedef struct dynmod {
   void *readtp_base;
   size_t readtp_size;
 
+  void *tls_addr;
   int tls_offset;
   int tls_size;
 

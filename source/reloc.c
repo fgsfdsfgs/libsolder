@@ -16,12 +16,13 @@ static int process_relocs(dynmod_t *mod, const Elf64_Rela *rels, const size_t nu
     const int type = ELF64_R_TYPE(rels[j].r_info);
     uintptr_t symval = 0;
     uintptr_t symbase = (uintptr_t)mod->load_virtbase;
+    const char *symname = NULL;
 
     if (symno) {
       // if the reloc refers to a symbol, get the symbol value in there
       const Elf64_Sym *sym = &mod->dynsym[symno];
       if (sym->st_shndx == SHN_UNDEF) {
-        const char *symname = mod->dynstrtab + sym->st_name;
+        symname = mod->dynstrtab + sym->st_name;
         // HACK: patch references to __aarch64_read_tp if this is it and we have a replacement
         if (mod->readtp_virtbase && !strcmp(symname, "__aarch64_read_tp")) {
           symval = (uintptr_t)mod->readtp_virtbase;
@@ -31,8 +32,12 @@ static int process_relocs(dynmod_t *mod, const Elf64_Rela *rels, const size_t nu
         }
         symbase = 0; // symbol is somewhere else
         if (!symval) {
-          DEBUG_PRINTF("`%s`: resolution failed for `%s`\n", mod->name, symname);
-          ++num_failed;
+          const int weak = (ELF64_ST_BIND(sym->st_info) == STB_WEAK);
+          DEBUG_PRINTF("`%s`: resolution failed for `%s`%s\n", mod->name, symname, weak ? " (weak)" : "");
+          if (weak)
+            continue; // skip weak syms instead of failing
+          else
+            ++num_failed;
         }
       } else {
         if (imports_only) continue;
@@ -44,18 +49,27 @@ static int process_relocs(dynmod_t *mod, const Elf64_Rela *rels, const size_t nu
 
     switch (type) {
       case R_AARCH64_RELATIVE:
-        // sometimes the value of r_addend is also at *ptr
+        // sometimes the value of r_addend is also at *ptrs
         *ptr = symbase + rels[j].r_addend;
         break;
       case R_AARCH64_ABS64:
       case R_AARCH64_GLOB_DAT:
       case R_AARCH64_JUMP_SLOT:
-        *ptr = symval + rels[j].r_addend;
+        *ptr = symbase + symval + rels[j].r_addend;
+        break;
+      case R_AARCH64_TLS_TPREL64:
+        // ignore it and hope for the best
+        DEBUG_PRINTF("`%s`: R_AARCH64_TLS_TPREL64 relocation ignored\n", mod->name);
+        break;
+      case R_AARCH64_TLSDESC:
+        // give it our dumb TLS resolver and hope it works
+        *ptr = (uintptr_t)solder_tls_resolve_tlsdesc;
+        DEBUG_PRINTF("`%s`: R_AARCH64_TLSDESC relocation at %p\n", mod->name, ptr);
         break;
       case R_AARCH64_NONE:
         break; // sorry nothing
       default:
-        solder_set_error("`%s`: Unknown relocation type: %x", mod->name, type);
+        solder_set_error("`%s`: Unknown relocation type: %d", mod->name, type);
         return -1;
     }
   }
@@ -66,6 +80,8 @@ static int process_relocs(dynmod_t *mod, const Elf64_Rela *rels, const size_t nu
 int solder_relocate(dynmod_t *mod, const int ignore_undef, const int imports_only) {
   Elf64_Rela *rela = NULL;
   Elf64_Rela *jmprel = NULL;
+  void **tlsdesc_plt = NULL;
+  void **tlsdesc_got = NULL;
   uint32_t pltrel = 0;
   size_t relasz = 0;
   size_t pltrelsz = 0;
@@ -93,9 +109,21 @@ int solder_relocate(dynmod_t *mod, const int ignore_undef, const int imports_onl
       case DT_PLTRELSZ:
         pltrelsz = dyn->d_un.d_val;
         break;
+      case DT_TLSDESC_GOT:
+        tlsdesc_got = (void **)(mod->load_virtbase + dyn->d_un.d_ptr);
+        break;
+      case DT_TLSDESC_PLT:
+        tlsdesc_plt = (void **)(mod->load_virtbase + dyn->d_un.d_ptr);
+        break;
       default:
         break;
     }
+  }
+
+  if (tlsdesc_got && tlsdesc_plt) {
+    // tls trampoline in PLT calling a function pointer in GOT; provide that pointer
+    DEBUG_PRINTF("`%s`: TLS trampoline calling %p (%p)\n", mod->name, tlsdesc_got, *tlsdesc_got);
+    *tlsdesc_got = solder_tls_resolve_static;
   }
 
   if (rela && relasz) {

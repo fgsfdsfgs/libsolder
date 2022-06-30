@@ -3,6 +3,7 @@
 #include "common.h"
 #include "solder.h"
 #include "util.h"
+#include "exports.h"
 #include "lookup.h"
 
 const Elf64_Sym *solder_elf_hashtab_lookup(
@@ -68,6 +69,12 @@ void *solder_lookup_global(const char *symname) {
     if (sym && sym->st_shndx != SHN_UNDEF)
       return (void *)((uintptr_t)mod->load_virtbase + sym->st_value);
     mod = mod->next;
+  }
+  // try the aux exports table if it exists
+  if (&__solder_aux_exports && &__solder_num_aux_exports && __solder_aux_exports) {
+    for (size_t i = 0; i < __solder_num_aux_exports; ++i)
+      if (!strcmp(symname, __solder_aux_exports[i].name))
+        return __solder_aux_exports[i].addr_rx;
   }
   return NULL;
 }

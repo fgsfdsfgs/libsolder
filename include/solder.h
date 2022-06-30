@@ -70,6 +70,10 @@ int solder_set_main_exports(const solder_export_t *exp, const int numexp);
 void *solder_get_data_addr(void *handle);
 /* get text seg address (r/x) */
 void *solder_get_text_addr(void *handle);
+/* get module base */
+void *solder_get_base_addr(void *handle);
+/* get entry point address (if executable) */
+void *solder_get_entry_addr(void *handle);
 /* replace code at `symname` with branch to another function at `dstaddr` */
 int solder_hook_function(void *__restrict handle, const char *__restrict symname, void *dstaddr);
 /* reverse lookup symbol name by its address */

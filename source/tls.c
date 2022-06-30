@@ -82,6 +82,16 @@ static inline void tls_alloc_init(uint8_t *tls_base) {
   DEBUG_PRINTF("tls_alloc_init(): available TLS space: %d bytes, start %d\n", tls_size, tls_start);
 }
 
+// overridable resolver for global static TLS
+__attribute__((weak)) intptr_t solder_tls_resolve_static(intptr_t ofs) {
+  return ofs;
+}
+
+// overridable resolver for TLSDESC TLS; first word is the resolver, second word is the offset
+__attribute__((weak)) intptr_t solder_tls_resolve_tlsdesc(void **desc) {
+  return (intptr_t)desc[1];
+}
+
 int solder_tls_alloc(dynmod_t *mod) {
   uint8_t *tls_base = __aarch64_read_tp();
 
@@ -94,7 +104,7 @@ int solder_tls_alloc(dynmod_t *mod) {
   uint8_t *mod_tls_end = solder_lookup(mod, "__tls_end");
   const int mod_tls_size = mod_tls_end - mod_tls_start + sizeof(void *); // extra space for __tls_guard
   if (!mod_tls_start || !mod_tls_end || mod_tls_size <= 0) {
-    DEBUG_PRINTF("`%s`: no TLS\n", mod->name);
+    DEBUG_PRINTF("`%s`: no local-exec TLS\n", mod->name);
     return 0;
   }
 
@@ -133,11 +143,13 @@ int solder_tls_alloc(dynmod_t *mod) {
 
   mod->tls_offset = tls_offset;
   mod->tls_size = mod_tls_size_aligned;
+  mod->tls_addr = tls_base + tls_start + tls_offset;
 
   // generate a patched version of __aarch64_read_tp that adds the offset to our block
   if (tls_generate_readtp(mod)) {
     mod->tls_offset = 0;
     mod->tls_size = 0;
+    mod->tls_addr = NULL;
     return -4;
   }
 
@@ -155,6 +167,7 @@ void solder_tls_free(dynmod_t *mod) {
       tls_offset -= mod->tls_size;
     mod->tls_size = 0;
     mod->tls_offset = 0;
+    mod->tls_addr = NULL;
   }
 
   if (mod->readtp_virtbase) {

@@ -10,6 +10,7 @@
 #endif
 
 #define ALIGN_MEM(x, align) (((x) + ((align) - 1)) & ~((align) - 1))
+#define ALIGN_DN(x, align) (((x) / (align)) * (align))
 #define ALIGN_PAGE 0x1000
 
 void solder_set_error(const char *fmt, ...);

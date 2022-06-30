@@ -25,7 +25,7 @@ DESTDIR	?=	$(PORTLIBS)
 #---------------------------------------------------------------------------------
 ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIC -ftls-model=local-exec
 
-CFLAGS	:=	-g -Wall -Werror -O2 \
+CFLAGS	:=	-g -Wall -O2 \
 			-ffunction-sections \
 			-fdata-sections \
 			$(ARCH) \
