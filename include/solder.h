@@ -66,16 +66,18 @@ int solder_set_main_exports(const solder_export_t *exp, const int numexp);
 
 /* these only work on modules that haven't been finalized, so use LAZY */
 
-/* get data seg address (r/o) */
+/* get data seg address (r/o if mapped, r/w if unmapped) */
 void *solder_get_data_addr(void *handle);
-/* get text seg address (r/x) */
+/* get text seg address (r/x if mapped, r/w if unmapped) */
 void *solder_get_text_addr(void *handle);
-/* get module base */
+/* get module base (r/w if unmapped) */
 void *solder_get_base_addr(void *handle);
-/* get entry point address (if executable) */
+/* get entry point address (if executable, also r/w if unmapped) */
 void *solder_get_entry_addr(void *handle);
 /* replace code at `symname` with branch to another function at `dstaddr` */
 int solder_hook_function(void *__restrict handle, const char *__restrict symname, void *dstaddr);
+/* replace code at module offset with branch to another function at `dstaddr` */
+int solder_hook_offset(void *__restrict handle, unsigned long long ofs, void *dstaddr);
 /* reverse lookup symbol name by its address */
 int solder_dladdr(void *addr, solder_dl_info_t *info);
 

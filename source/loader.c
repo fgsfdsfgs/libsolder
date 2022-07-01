@@ -166,7 +166,34 @@ dynmod_t *solder_dso_load(const char *filename, const char *modname) {
     goto err_free_load;
   }
 
-  // map all the segs in right away
+  mod->name = solder_strdup(modname);
+  mod->type = ehdr->e_type;
+  if (mod->type == ET_EXEC) {
+    mod->entry = mod->load_virtbase + ehdr->e_entry;
+    DEBUG_PRINTF("`%s`: is executable: entry at %p\n", modname, mod->entry);
+  }
+
+  so_num_modules++;
+
+  free(ehdr); // don't need this no more
+
+  return mod;
+
+err_free_load:
+  virtmemLock();
+  virtmemRemoveReservation(mod->load_memrv);
+  virtmemUnlock();
+  for (size_t i = 0; i < mod->num_segs; ++i)
+    free(mod->segs[i].page);
+err_free_so:
+  free(mod->segs);
+  free(ehdr);
+  free(mod);
+
+  return NULL;
+}
+
+static int dso_map(dynmod_t *mod) {
   Result rc = 0;
   Handle self = envGetOwnProcessHandle();
   for (size_t i = 0; i < mod->num_segs; ++i) {
@@ -182,37 +209,16 @@ dynmod_t *solder_dso_load(const char *filename, const char *modname) {
     }
   }
 
-  DEBUG_PRINTF("`%s`: mapped to %p - %p\n", modname, mod->load_virtbase, mod->load_virtbase + mod->load_size);
-
-  mod->name = solder_strdup(modname);
   mod->flags |= MOD_MAPPED;
-  mod->type = ehdr->e_type;
-  if (mod->type == ET_EXEC) {
-    mod->entry = mod->load_virtbase + ehdr->e_entry;
-    DEBUG_PRINTF("`%s`: is executable: entry at %p\n", modname, mod->entry);
-  }
 
-  so_num_modules++;
+  DEBUG_PRINTF("`%s`: mapped to %p - %p\n", mod->name, mod->load_virtbase, mod->load_virtbase + mod->load_size);
 
-  free(ehdr); // don't need this no more
-
-  return mod;
+  return 0;
 
 err_free_unmap:
   for (size_t i = 0; i < mod->num_segs; ++i)
     svcUnmapProcessCodeMemory(self, (u64)mod->segs[i].virtpage, (u64)mod->segs[i].page, mod->segs[i].size);
-err_free_load:
-  virtmemLock();
-  virtmemRemoveReservation(mod->load_memrv);
-  virtmemUnlock();
-  for (size_t i = 0; i < mod->num_segs; ++i)
-    free(mod->segs[i].page);
-err_free_so:
-  free(mod->segs);
-  free(ehdr);
-  free(mod);
-
-  return NULL;
+  return -1;
 }
 
 static void dso_initialize(dynmod_t *mod) {
@@ -255,6 +261,8 @@ static void dso_unlink(dynmod_t *mod) {
 }
 
 static int dso_relocate_and_init(dynmod_t *mod, int ignore_undef) {
+  if (!(mod->flags & MOD_MAPPED))
+    dso_map(mod);
   if (!(mod->flags & MOD_RELOCATED) && solder_relocate(mod, ignore_undef, 0))
     return -1;
   if (!(mod->flags & MOD_INITIALIZED))
@@ -267,6 +275,12 @@ static void dso_relocate_and_init_all(int ignore_undef) {
   DEBUG_PRINTF("dso_relocate_and_init_all(): processing %d loaded modules\n", so_num_modules);
 
   int not_relocated = 0;
+
+  DEBUG_PRINTF("* mapping modules\n");
+  for (dynmod_t *p = solder_dsolist.next; p; p = p->next) {
+    if (!(p->flags & MOD_MAPPED))
+      dso_map(p);
+  }
 
   DEBUG_PRINTF("* relocating modules\n");
   for (dynmod_t *p = solder_dsolist.next; p; p = p->next) {
@@ -607,7 +621,7 @@ void *solder_get_data_addr(void *handle) {
   // find data-looking segment
   for (size_t i = 0; i < mod->num_segs; ++i)
     if (mod->segs[i].pflags == Perm_R)
-      return mod->segs[i].virtbase;
+      return (mod->flags & MOD_MAPPED) ? mod->segs[i].virtbase : mod->segs[i].base;
 
   return NULL;
 }
@@ -622,7 +636,7 @@ void *solder_get_text_addr(void *handle) {
   // find text-looking segment
   for (size_t i = 0; i < mod->num_segs; ++i)
     if (mod->segs[i].pflags == Perm_Rx)
-      return mod->segs[i].virtbase;
+      return (mod->flags & MOD_MAPPED) ? mod->segs[i].virtbase : mod->segs[i].base;
 
   return NULL;
 }
@@ -633,7 +647,7 @@ void *solder_get_base_addr(void *handle) {
     return NULL;
   }
   dynmod_t *mod = handle;
-  return mod->load_virtbase;
+  return (mod->flags & MOD_MAPPED) ? mod->load_virtbase : mod->load_base;
 }
 
 void *solder_get_entry_addr(void *handle) {
@@ -643,12 +657,33 @@ void *solder_get_entry_addr(void *handle) {
   }
 
   dynmod_t *mod = handle;
-  if (mod->type == ET_EXEC)
-    return mod->entry;
-  else
+  if (mod->type == ET_EXEC) {
+    void *ret = mod->entry;
+    if (!(mod->flags & MOD_MAPPED))
+      ret = ret - mod->load_virtbase + mod->load_base;
+  } else {
     solder_set_error("solder_get_entry_addr(): not an executable");
+  }
 
   return NULL;
+}
+
+int solder_hook_offset(void *__restrict handle, unsigned long long ofs, void *dstaddr) {
+  if (!handle) {
+    solder_set_error("solder_hook_offset(): NULL handle");
+    return -1;
+  }
+
+  dynmod_t *mod = handle;
+  if (!mod->load_base) return -3;
+
+  uint32_t *srcaddr = ((mod->flags & MOD_MAPPED) ? mod->load_virtbase : mod->load_base) + ofs;
+
+  srcaddr[0] = 0x58000051u; // LDR X17, #0x8
+  srcaddr[1] = 0xd61f0220u; // BR X17
+  *(uint64_t *)(srcaddr + 2) = (uint64_t)dstaddr;
+
+  return 0;
 }
 
 int solder_hook_function(void *__restrict handle, const char *__restrict symname, void *dstaddr) {
@@ -658,13 +693,13 @@ int solder_hook_function(void *__restrict handle, const char *__restrict symname
   }
 
   dynmod_t *mod = handle;
-  if (mod->flags & MOD_MAPPED) {
-    solder_set_error("`%s`: Already remapped as R/X", mod->name);
-    return -2;
-  }
+  if (!mod->load_base) return -2;
 
   uint32_t *srcaddr = solder_dlsym(handle, symname);
   if (!srcaddr) return -3;
+
+  if (!(mod->flags & MOD_MAPPED))
+    srcaddr = (void *)srcaddr - mod->load_virtbase + mod->load_base;
 
   srcaddr[0] = 0x58000051u; // LDR X17, #0x8
   srcaddr[1] = 0xd61f0220u; // BR X17
