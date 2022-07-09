@@ -147,6 +147,26 @@ int solder_relocate(dynmod_t *mod, const int ignore_undef, const int imports_onl
     }
   }
 
+  if (mod->type == ET_EXEC) {
+    // HACK: it looks like in PIEs this sometimes isn't covered by relocs, so we fix it by hand
+    if (mod->init_array && mod->num_init) {
+      for (size_t i = 0; i < mod->num_init; ++i)
+        if ((void *)mod->init_array[i] >= mod->vma_start && (void *)mod->init_array[i] < mod->vma_start + mod->vma_size)
+          mod->init_array[i] +=  (uintptr_t)mod->load_virtbase;
+    }
+    if (mod->fini_array && mod->num_fini) {
+      for (size_t i = 0; i < mod->num_fini; ++i)
+        if ((void *)mod->fini_array[i] >= mod->vma_start && (void *)mod->fini_array[i] < mod->vma_start + mod->vma_size)
+          mod->fini_array[i] +=  (uintptr_t)mod->load_virtbase;
+    }
+    if (mod->got && mod->num_got) {
+      for (size_t i = 0; i < mod->num_got; ++i) {
+        if (mod->got[i] >= mod->vma_start && mod->got[i] < mod->vma_start + mod->vma_size)
+          mod->got[i] += (uintptr_t)mod->load_virtbase;
+      }
+    }
+  }
+
   mod->flags |= MOD_RELOCATED;
 
   return 0;

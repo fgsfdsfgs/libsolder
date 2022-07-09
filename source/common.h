@@ -36,6 +36,9 @@ typedef struct dynmod {
   int refcount;
   void *entry;
 
+  void *vma_start;
+  size_t vma_size;
+
   void *load_base;
   void *load_virtbase;
   VirtmemReservation *load_memrv;

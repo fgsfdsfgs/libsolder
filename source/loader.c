@@ -77,11 +77,17 @@ dynmod_t *solder_dso_load(const char *filename, const char *modname) {
   for (size_t i = 0; i < ehdr->e_phnum; i++) {
     if (phdr[i].p_type == PT_LOAD && phdr[i].p_memsz) {
       const size_t this_size = phdr[i].p_vaddr + phdr[i].p_memsz;
-      if (this_size > mod->load_size) mod->load_size = this_size;
-      if (phdr[i].p_align > max_align) max_align = phdr[i].p_align;
+      if (phdr[i].p_align > max_align)
+        max_align = phdr[i].p_align;
+      if (!mod->vma_start || (void *)phdr[i].p_vaddr < mod->vma_start)
+        mod->vma_start = (void *)phdr[i].p_vaddr;
+      if (this_size > mod->load_size)
+        mod->load_size = this_size;
       ++mod->num_segs;
     }
   }
+
+  mod->vma_size = mod->load_size - (uintptr_t)mod->vma_start;
 
   // round up to max segment alignment
   mod->load_size = ALIGN_MEM(mod->load_size, max_align);
@@ -351,6 +357,9 @@ static void dep_scan(dynmod_t *mod) {
     DEBUG_PRINTF("`%s`: NULL dynamic\n", mod ? mod->name : "(null)");
     return;
   }
+
+  if (!(mod->flags & MOD_MAPPED))
+    dso_map(mod);
 
   DEBUG_PRINTF("`%s`: scanning for deps\n", mod->name);
 
