@@ -259,6 +259,7 @@ const solder_export_t solder_default_exports[] __attribute__((used)) = {
   SOLDER_EXPORT_SYMBOL(sprintf),
   SOLDER_EXPORT_SYMBOL(snprintf),
   SOLDER_EXPORT_SYMBOL(vsnprintf),
+  SOLDER_EXPORT_SYMBOL(vsprintf),
   SOLDER_EXPORT_SYMBOL(strlen),
   SOLDER_EXPORT_SYMBOL(strcpy),
   SOLDER_EXPORT_SYMBOL(strncpy),
