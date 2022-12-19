@@ -113,11 +113,11 @@ dynmod_t *solder_dso_load(const char *filename, const char *modname) {
       if (phdr[i].p_flags & PF_X) mod->segs[n].pflags |= Perm_X;
       mod->segs[n].align = (phdr[i].p_align < ALIGN_PAGE) ? ALIGN_PAGE : phdr[i].p_align;
       mod->segs[n].virtbase = (void *)((Elf64_Addr)mod->load_virtbase + phdr[i].p_vaddr);
-      mod->segs[n].virtpage = (void *)ALIGN_DN((Elf64_Addr)mod->segs[n].virtbase, mod->segs[n].align);
-      mod->segs[n].virtend = (void *)ALIGN_MEM((Elf64_Addr)mod->segs[n].virtbase + phdr[i].p_memsz, mod->segs[n].align);
+      mod->segs[n].virtpage = (void *)ALIGN_DN((Elf64_Addr)mod->segs[n].virtbase, ALIGN_PAGE);
+      mod->segs[n].virtend = (void *)ALIGN_MEM((Elf64_Addr)mod->segs[n].virtbase + phdr[i].p_memsz, ALIGN_PAGE);
       mod->segs[n].size = (Elf64_Addr)mod->segs[n].virtend - (Elf64_Addr)mod->segs[n].virtpage;
       // create an aligned copy of the segment
-      mod->segs[n].page = memalign(mod->segs[n].align, mod->segs[n].size);
+      mod->segs[n].page = memalign(ALIGN_PAGE, mod->segs[n].size);
       if (!mod->segs[n].page) {
         solder_set_error("Could not allocate `%lu` bytes for segment %lu\n", mod->segs[n].size, n);
         goto err_free_load;
@@ -138,6 +138,9 @@ dynmod_t *solder_dso_load(const char *filename, const char *modname) {
 
   // base is the base of the first segment
   mod->load_base = mod->segs[0].base;
+
+  DEBUG_PRINTF("`%s`: load base = %p\n", filename, mod->load_base);
+  DEBUG_PRINTF("`%s`: virt base = %p\n", filename, mod->load_virtbase);
 
   if (!mod->dynamic) {
     solder_set_error("`%s` doesn't have a DYNAMIC segment", filename);
