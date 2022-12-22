@@ -148,7 +148,8 @@ int solder_relocate(dynmod_t *mod, const int ignore_undef, const int imports_onl
   }
 
   if (mod->type == ET_EXEC) {
-    // HACK: it looks like in PIEs this sometimes isn't covered by relocs, so we fix it by hand
+    // HACKHACKHACK: ET_EXECs are probably not relocatable; but we'll try anyway
+    // relocate the basic stuff, let the user worry about everything else
     if (mod->init_array && mod->num_init) {
       for (size_t i = 0; i < mod->num_init; ++i)
         if ((void *)mod->init_array[i] >= mod->vma_start && (void *)mod->init_array[i] < mod->vma_start + mod->vma_size)

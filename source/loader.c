@@ -484,6 +484,11 @@ void solder_autoload(void) {
 void *solder_dlopen(const char *fname, int flags) {
   dynmod_t *mod = NULL;
 
+  if (!fname) {
+    DEBUG_PRINTF("dlopen(): trying to open root module\n");
+    return &solder_dsolist;
+  }
+
   // see if the module is already loaded and just increase refcount if it is
   for (dynmod_t *p = solder_dsolist.next; p; p = p->next) {
     if (!strcmp(p->name, fname)) {
@@ -526,6 +531,11 @@ int solder_dlclose(void *handle) {
   if (!handle) {
     solder_set_error("dlclose(): NULL handle");
     return -1;
+  }
+
+  if (handle == &solder_dsolist) {
+    DEBUG_PRINTF("dlclose(): tried to close main module\n");
+    return 0;
   }
 
   dynmod_t *mod = handle;
