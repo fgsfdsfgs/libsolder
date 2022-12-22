@@ -63,18 +63,30 @@ const Elf64_Sym *solder_reverse_lookup_sym(const dynmod_t *mod, const void *addr
 void *solder_lookup_global(const char *symname) {
   if (!symname || !*symname)
     return NULL;
+
   const dynmod_t *mod = &solder_dsolist;
+
+  // try the override exports table if it exists
+  if (&__solder_override_exports && &__solder_num_override_exports && __solder_override_exports) {
+    for (size_t i = 0; i < __solder_num_override_exports; ++i)
+      if (!strcmp(symname, __solder_override_exports[i].name))
+        return __solder_override_exports[i].addr_rx;
+  }
+
+  // try actual modules
   while (mod) {
     const Elf64_Sym *sym = solder_lookup_sym(mod, symname);
     if (sym && sym->st_shndx != SHN_UNDEF)
       return (void *)((uintptr_t)mod->load_virtbase + sym->st_value);
     mod = mod->next;
   }
+
   // try the aux exports table if it exists
   if (&__solder_aux_exports && &__solder_num_aux_exports && __solder_aux_exports) {
     for (size_t i = 0; i < __solder_num_aux_exports; ++i)
       if (!strcmp(symname, __solder_aux_exports[i].name))
         return __solder_aux_exports[i].addr_rx;
   }
+
   return NULL;
 }

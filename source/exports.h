@@ -8,6 +8,10 @@
 extern __attribute__((weak)) const solder_export_t *__solder_aux_exports;
 extern __attribute__((weak)) const size_t __solder_num_aux_exports;
 
+// optional user-defined global exports that will override everything
+extern __attribute__((weak)) const solder_export_t *__solder_override_exports;
+extern __attribute__((weak)) const size_t __solder_num_override_exports;
+
 uint32_t solder_elf_hash(const uint8_t *name);
 
 const Elf64_Sym *solder_elf_hashtab_lookup(
