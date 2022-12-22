@@ -78,6 +78,8 @@ void *solder_get_entry_addr(void *handle);
 int solder_hook_function(void *__restrict handle, const char *__restrict symname, void *dstaddr);
 /* replace code at module offset with branch to another function at `dstaddr` */
 int solder_hook_offset(void *__restrict handle, unsigned long long ofs, void *dstaddr);
+/* replace `size` bytes at module offset with `dst`; if `src` != NULL, check whether they match `src` before replacing */
+int solder_patch_offset(void *__restrict handle, unsigned long long ofs, const void *src, const void *dst, unsigned long size);
 /* reverse lookup symbol name by its address */
 int solder_dladdr(void *addr, solder_dl_info_t *info);
 

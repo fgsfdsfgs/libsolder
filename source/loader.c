@@ -49,11 +49,11 @@ dynmod_t *solder_dso_load(const char *filename, const char *modname) {
   so_size = ftell(fd);
   fseek(fd, 0, SEEK_SET);
 
-  DEBUG_PRINTF("`%s`: total elf size is %lu\n", filename, so_size);
+  DEBUG_PRINTF("`%s`: total elf size is %lu\n", modname, so_size);
 
   ehdr = memalign(ALIGN_PAGE, so_size);
   if (!ehdr) {
-    solder_set_error("Could not allocate %lu bytes for `%s`", so_size, filename);
+    solder_set_error("Could not allocate %lu bytes for `%s`", so_size, modname);
     fclose(fd);
     free(mod);
     return NULL;
@@ -63,7 +63,7 @@ dynmod_t *solder_dso_load(const char *filename, const char *modname) {
   fclose(fd);
 
   if (memcmp(ehdr, ELFMAG, SELFMAG) != 0) {
-    solder_set_error("`%s` is not a valid ELF file", filename);
+    solder_set_error("`%s` is not a valid ELF file", modname);
     goto err_free_so;
   }
 
@@ -92,7 +92,7 @@ dynmod_t *solder_dso_load(const char *filename, const char *modname) {
   // round up to max segment alignment
   mod->load_size = ALIGN_MEM(mod->load_size, max_align);
 
-  DEBUG_PRINTF("`%s`: total memory reserved %lu; %lu segs total\n", filename, mod->load_size, mod->num_segs);
+  DEBUG_PRINTF("`%s`: total memory reserved %lu; %lu segs total\n", modname, mod->load_size, mod->num_segs);
 
   // reserve virtual memory space for the entire LOAD zone while we're fucking with the ELF
   virtmemLock();
@@ -103,7 +103,7 @@ dynmod_t *solder_dso_load(const char *filename, const char *modname) {
   // collect segments
   mod->segs = calloc(mod->num_segs, sizeof(*mod->segs));
   if (!mod->segs) {
-    solder_set_error("Could not allocate space for `%s`'s segment table", filename);
+    solder_set_error("Could not allocate space for `%s`'s segment table", modname);
     goto err_free_load;
   }
   for (size_t i = 0, n = 0; i < ehdr->e_phnum; i++) {
@@ -139,8 +139,8 @@ dynmod_t *solder_dso_load(const char *filename, const char *modname) {
   // base is the base of the first segment
   mod->load_base = mod->segs[0].base;
 
-  DEBUG_PRINTF("`%s`: load base = %p\n", filename, mod->load_base);
-  DEBUG_PRINTF("`%s`: virt base = %p\n", filename, mod->load_virtbase);
+  DEBUG_PRINTF("`%s`: load base = %p\n", modname, mod->load_base);
+  DEBUG_PRINTF("`%s`: virt base = %p\n", modname, mod->load_virtbase);
 
   if (!mod->dynamic) {
     solder_set_error("`%s` doesn't have a DYNAMIC segment", filename);
@@ -167,6 +167,9 @@ dynmod_t *solder_dso_load(const char *filename, const char *modname) {
     } else if (!strcmp(sh_name, ".got")) {
       mod->got = (void *)((Elf64_Addr)mod->load_virtbase + shdr[i].sh_addr);
       mod->num_got = shdr[i].sh_size / sizeof(void *);
+    } else if (!strcmp(sh_name, ".text")) {
+      // useful for gdb
+      DEBUG_PRINTF("`%s`: text start = %p\n", modname, mod->load_virtbase + shdr[i].sh_addr); 
     }
   }
 
@@ -683,11 +686,35 @@ void *solder_get_entry_addr(void *handle) {
     void *ret = mod->entry;
     if (!(mod->flags & MOD_MAPPED))
       ret = ret - mod->load_virtbase + mod->load_base;
+    return ret;
   } else {
     solder_set_error("solder_get_entry_addr(): not an executable");
   }
 
   return NULL;
+}
+
+int solder_patch_offset(void *__restrict handle, unsigned long long ofs, const void *src, const void *dst, unsigned long size) {
+  if (!handle) {
+    solder_set_error("solder_patch_offset(): NULL handle");
+    return -1;
+  }
+
+  dynmod_t *mod = handle;
+  if (!mod->load_base) return -3;
+
+  void *ptr = ((mod->flags & MOD_MAPPED) ? mod->load_virtbase : mod->load_base) + ofs;
+  if (src) {
+    // sanity check
+    if (memcmp(ptr, src, size) != 0) {
+      solder_set_error("solder_patch_offset(): source data mismatch\n");
+      return -1;
+    }
+  }
+
+  memcpy(ptr, dst, size);
+
+  return 0;
 }
 
 int solder_hook_offset(void *__restrict handle, unsigned long long ofs, void *dstaddr) {
