@@ -151,13 +151,13 @@ dynmod_t *solder_dso_load(const char *filename, const char *modname) {
   for (int i = 0; i < ehdr->e_shnum; i++) {
     const char *sh_name = shstrtab + shdr[i].sh_name;
     if (!strcmp(sh_name, ".dynsym")) {
-      mod->dynsym = (Elf64_Sym *)((Elf64_Addr)mod->load_virtbase + shdr[i].sh_addr);
+      mod->dynsym = (Elf64_Sym *)((Elf64_Addr)mod->load_base + shdr[i].sh_addr);
       mod->num_dynsym = shdr[i].sh_size / sizeof(Elf64_Sym);
     } else if (!strcmp(sh_name, ".dynstr")) {
-      mod->dynstrtab = (char *)((Elf64_Addr)mod->load_virtbase + shdr[i].sh_addr);
+      mod->dynstrtab = (char *)((Elf64_Addr)mod->load_base + shdr[i].sh_addr);
     } else if (!strcmp(sh_name, ".hash")) {
       // optional: if there's no hashtab, linear lookup will be used
-      mod->hashtab = (uint32_t *)((Elf64_Addr)mod->load_virtbase + shdr[i].sh_addr);
+      mod->hashtab = (uint32_t *)((Elf64_Addr)mod->load_base + shdr[i].sh_addr);
     } else if (!strcmp(sh_name, ".init_array")) {
       mod->init_array = (void *)((Elf64_Addr)mod->load_virtbase + shdr[i].sh_addr);
       mod->num_init = shdr[i].sh_size / sizeof(void *);
@@ -220,6 +220,11 @@ static int dso_map(dynmod_t *mod) {
       goto err_free_unmap;
     }
   }
+
+  // these are all remapped now
+  mod->dynsym = (void *)mod->dynsym - mod->load_base + mod->load_virtbase;
+  mod->dynstrtab = (void *)mod->dynstrtab - mod->load_base + mod->load_virtbase;
+  mod->hashtab = (void *)mod->hashtab - mod->load_base + mod->load_virtbase;
 
   mod->flags |= MOD_MAPPED;
 
@@ -724,10 +729,12 @@ int solder_hook_offset(void *__restrict handle, unsigned long long ofs, void *ds
   }
 
   dynmod_t *mod = handle;
-  if (!mod->load_base) return -3;
+  if (!mod->load_base || (mod->flags & MOD_MAPPED)) {
+    solder_set_error("solder_hook_offset(): module is already mapped");
+    return -2;
+  }
 
-  uint32_t *srcaddr = ((mod->flags & MOD_MAPPED) ? mod->load_virtbase : mod->load_base) + ofs;
-
+  uint32_t *srcaddr = mod->load_base + ofs;
   srcaddr[0] = 0x58000051u; // LDR X17, #0x8
   srcaddr[1] = 0xd61f0220u; // BR X17
   *(uint64_t *)(srcaddr + 2) = (uint64_t)dstaddr;
@@ -742,14 +749,18 @@ int solder_hook_function(void *__restrict handle, const char *__restrict symname
   }
 
   dynmod_t *mod = handle;
-  if (!mod->load_base) return -2;
+  if (!mod->load_base || (mod->flags & MOD_MAPPED)) {
+    solder_set_error("solder_hook_function(): module is already mapped");
+    return -2;
+  }
 
-  uint32_t *srcaddr = solder_dlsym(handle, symname);
-  if (!srcaddr) return -3;
+  const Elf64_Sym *sym = solder_lookup_sym(mod, symname);
+  if (!sym) {
+    solder_set_error("solder_hook_function(): could not find `%s`", symname);
+    return -3;
+  }
 
-  if (!(mod->flags & MOD_MAPPED))
-    srcaddr = (void *)srcaddr - mod->load_virtbase + mod->load_base;
-
+  uint32_t *srcaddr = mod->load_base + sym->st_value;
   srcaddr[0] = 0x58000051u; // LDR X17, #0x8
   srcaddr[1] = 0xd61f0220u; // BR X17
   *(uint64_t *)(srcaddr + 2) = (uint64_t)dstaddr;
