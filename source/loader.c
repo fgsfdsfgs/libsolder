@@ -251,7 +251,7 @@ static void dso_initialize(dynmod_t *mod) {
 static void dso_finalize(dynmod_t *mod) {
   if (mod->fini_array) {
     DEBUG_PRINTF("`%s`: fini array %p has %lu entries\n", mod->name, mod->fini_array, mod->num_fini);
-    for (size_t i = 0; i < mod->num_fini; ++i)
+    for (int i = (int)mod->num_fini - 1; i >= 0; --i)
       if (mod->fini_array[i])
         mod->fini_array[i]();
     mod->fini_array = NULL;
