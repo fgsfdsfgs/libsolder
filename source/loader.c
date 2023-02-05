@@ -510,6 +510,9 @@ void *solder_dlopen(const char *fname, int flags) {
     return mod;
   }
 
+  // clear error flag since we're starting work on a new library
+  solder_dlerror();
+
   // load the module
   mod = solder_dso_load(fname, fname);
   if (!mod) return NULL;

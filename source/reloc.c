@@ -7,7 +7,7 @@
 #include "tls.h"
 #include "reloc.h"
 
-static int process_relocs(dynmod_t *mod, const Elf64_Rela *rels, const size_t num_rels, const int imports_only) {
+static int process_relocs(dynmod_t *mod, const Elf64_Rela *rels, const size_t num_rels, const int imports_only, const int ignore_undef) {
   int num_failed = 0;
 
   for (size_t j = 0; j < num_rels; j++) {
@@ -33,11 +33,14 @@ static int process_relocs(dynmod_t *mod, const Elf64_Rela *rels, const size_t nu
         symbase = 0; // symbol is somewhere else
         if (!symval) {
           const int weak = (ELF64_ST_BIND(sym->st_info) == STB_WEAK);
-          DEBUG_PRINTF("`%s`: resolution failed for `%s`%s\n", mod->name, symname, weak ? " (weak)" : "");
-          if (weak)
-            continue; // skip weak syms instead of failing
-          else
+          if (weak || ignore_undef) {
+            // ignore resolution failure for weak syms or if we don't care
+            DEBUG_PRINTF("`%s`: resolution failed for `%s`%s\n", mod->name, symname, weak ? " (weak)" : "");
+            continue;
+          } else {
+            solder_set_error("`%s`: Could not resolve symbol: `%s`", mod->name, symname);
             ++num_failed;
+          }
         }
       } else {
         if (imports_only) continue;
@@ -129,9 +132,8 @@ int solder_relocate(dynmod_t *mod, const int ignore_undef, const int imports_onl
   if (rela && relasz) {
     DEBUG_PRINTF("`%s`: processing RELA@%p size %lu\n", mod->name, rela, relasz);
     // if there are any unresolved imports, bail unless it's the final relocation pass
-    if (process_relocs(mod, rela, relasz / sizeof(Elf64_Rela), imports_only))
-      if (!ignore_undef)
-        return -1;
+    if (process_relocs(mod, rela, relasz / sizeof(Elf64_Rela), imports_only, ignore_undef))
+      return -1;
   }
 
   if (jmprel && pltrelsz && pltrel) {
@@ -139,9 +141,8 @@ int solder_relocate(dynmod_t *mod, const int ignore_undef, const int imports_onl
     if (pltrel == DT_RELA) {
       DEBUG_PRINTF("`%s`: processing JMPREL@%p size %lu\n", mod->name, jmprel, pltrelsz);
       // if there are any unresolved imports, bail unless it's the final relocation pass
-      if (process_relocs(mod, jmprel, pltrelsz / sizeof(Elf64_Rela), imports_only))
-        if (!ignore_undef)
-          return -1;
+      if (process_relocs(mod, jmprel, pltrelsz / sizeof(Elf64_Rela), imports_only, ignore_undef))
+        return -1;
     } else {
       DEBUG_PRINTF("`%s`: DT_JMPREL has unsupported type %08x\n", mod->name, pltrel);
     }
