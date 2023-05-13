@@ -14,6 +14,7 @@
 #include <time.h>
 #include <assert.h>
 #include <elf.h>
+#include <sys/reent.h>
 
 #include "common.h"
 #include "solder.h"
@@ -186,8 +187,6 @@ int solder_set_main_exports(const solder_export_t *exp, const int numexp) {
    this is the bare minimum necessary to run testlib_cpp with local libstdc++ and a bunch of extras
    if you want to go the "link libstdc++ to main" route, you'll have to provide many C++ exports instead
 */
-
-extern void *__getreent(void);
 
 const solder_export_t solder_default_exports[] __attribute__((used)) = {
   SOLDER_EXPORT_SYMBOL(__getreent),
