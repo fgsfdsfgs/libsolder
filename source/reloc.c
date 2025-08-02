@@ -1,4 +1,5 @@
 #include <string.h>
+#include <limits.h>
 
 #include "common.h"
 #include "solder.h"
@@ -82,11 +83,13 @@ static int process_relocs(dynmod_t *mod, const Elf64_Rela *rels, const size_t nu
 
 int solder_relocate(dynmod_t *mod, const int ignore_undef, const int imports_only) {
   Elf64_Rela *rela = NULL;
+  Elf64_Relr *relr = NULL;
   Elf64_Rela *jmprel = NULL;
   void **tlsdesc_plt = NULL;
   void **tlsdesc_got = NULL;
   uint32_t pltrel = 0;
   size_t relasz = 0;
+  size_t relrsz = 0;
   size_t pltrelsz = 0;
 
   // allocate space in the main module's TLS for this module's TLS, if needed
@@ -101,6 +104,12 @@ int solder_relocate(dynmod_t *mod, const int ignore_undef, const int imports_onl
         break;
       case DT_RELASZ:
         relasz = dyn->d_un.d_val;
+        break;
+      case DT_RELR:
+        relr = (Elf64_Relr *)(mod->load_virtbase + dyn->d_un.d_ptr);
+        break;
+      case DT_RELRSZ:
+        relrsz = dyn->d_un.d_val;
         break;
       case DT_JMPREL:
         // TODO: don't assume RELA
@@ -134,6 +143,25 @@ int solder_relocate(dynmod_t *mod, const int ignore_undef, const int imports_onl
     // if there are any unresolved imports, bail unless it's the final relocation pass
     if (process_relocs(mod, rela, relasz / sizeof(Elf64_Rela), imports_only, ignore_undef))
       return -1;
+  }
+
+  if (relr && relrsz) {
+    DEBUG_PRINTF("`%s`: processing RELR@%p size %lu\n", mod->name, relr, relrsz);
+    const Elf64_Relr *relrend = relr + relrsz / sizeof(Elf64_Relr);
+    uintptr_t *loc = NULL;
+    for (; relr < relrend; ++relr) {
+      Elf64_Relr entry = *relr;
+      if ((entry & 1) == 0) {
+        loc = (uintptr_t *)(mod->load_virtbase + entry);
+        *loc++ += (uintptr_t)mod->load_virtbase;
+      } else {
+        for (intptr_t i = 0; (entry >>= 1) != 0; ++i) {
+          if (entry & 1)
+            loc[i] += (uintptr_t)mod->load_virtbase;
+        }
+        loc += CHAR_BIT * sizeof(Elf64_Relr) - 1;
+      }
+    }
   }
 
   if (jmprel && pltrelsz && pltrel) {
