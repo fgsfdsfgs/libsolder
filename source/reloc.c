@@ -8,7 +8,26 @@
 #include "tls.h"
 #include "reloc.h"
 
-static int process_relocs(dynmod_t *mod, const Elf64_Rela *rels, const size_t num_rels, const int imports_only, const int ignore_undef) {
+static void process_relr(dynmod_t *mod, const Elf64_Relr *relr, const size_t num_relr) {
+  const Elf64_Relr *relrend = relr + num_relr;
+  uintptr_t *loc = NULL;
+
+  for (; relr < relrend; ++relr) {
+    Elf64_Relr entry = *relr;
+    if ((entry & 1) == 0) {
+      loc = (uintptr_t *)(mod->load_virtbase + entry);
+      *loc++ += (uintptr_t)mod->load_virtbase;
+    } else {
+      for (intptr_t i = 0; (entry >>= 1) != 0; ++i) {
+        if (entry & 1)
+          loc[i] += (uintptr_t)mod->load_virtbase;
+      }
+      loc += CHAR_BIT * sizeof(Elf64_Relr) - 1;
+    }
+  }
+}
+
+static int process_rela(dynmod_t *mod, const Elf64_Rela *rels, const size_t num_rels, const int imports_only, const int ignore_undef) {
   int num_failed = 0;
 
   for (size_t j = 0; j < num_rels; j++) {
@@ -138,30 +157,16 @@ int solder_relocate(dynmod_t *mod, const int ignore_undef, const int imports_onl
     *tlsdesc_got = solder_tls_resolve_static;
   }
 
+  if (relr && relrsz) {
+    DEBUG_PRINTF("`%s`: processing RELR@%p size %lu\n", mod->name, relr, relrsz);
+    process_relr(mod, relr, relrsz / sizeof(Elf64_Relr));
+  }
+
   if (rela && relasz) {
     DEBUG_PRINTF("`%s`: processing RELA@%p size %lu\n", mod->name, rela, relasz);
     // if there are any unresolved imports, bail unless it's the final relocation pass
-    if (process_relocs(mod, rela, relasz / sizeof(Elf64_Rela), imports_only, ignore_undef))
+    if (process_rela(mod, rela, relasz / sizeof(Elf64_Rela), imports_only, ignore_undef))
       return -1;
-  }
-
-  if (relr && relrsz) {
-    DEBUG_PRINTF("`%s`: processing RELR@%p size %lu\n", mod->name, relr, relrsz);
-    const Elf64_Relr *relrend = relr + relrsz / sizeof(Elf64_Relr);
-    uintptr_t *loc = NULL;
-    for (; relr < relrend; ++relr) {
-      Elf64_Relr entry = *relr;
-      if ((entry & 1) == 0) {
-        loc = (uintptr_t *)(mod->load_virtbase + entry);
-        *loc++ += (uintptr_t)mod->load_virtbase;
-      } else {
-        for (intptr_t i = 0; (entry >>= 1) != 0; ++i) {
-          if (entry & 1)
-            loc[i] += (uintptr_t)mod->load_virtbase;
-        }
-        loc += CHAR_BIT * sizeof(Elf64_Relr) - 1;
-      }
-    }
   }
 
   if (jmprel && pltrelsz && pltrel) {
@@ -169,7 +174,7 @@ int solder_relocate(dynmod_t *mod, const int ignore_undef, const int imports_onl
     if (pltrel == DT_RELA) {
       DEBUG_PRINTF("`%s`: processing JMPREL@%p size %lu\n", mod->name, jmprel, pltrelsz);
       // if there are any unresolved imports, bail unless it's the final relocation pass
-      if (process_relocs(mod, jmprel, pltrelsz / sizeof(Elf64_Rela), imports_only, ignore_undef))
+      if (process_rela(mod, jmprel, pltrelsz / sizeof(Elf64_Rela), imports_only, ignore_undef))
         return -1;
     } else {
       DEBUG_PRINTF("`%s`: DT_JMPREL has unsupported type %08x\n", mod->name, pltrel);
