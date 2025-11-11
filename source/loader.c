@@ -224,7 +224,8 @@ static int dso_map(dynmod_t *mod) {
   // these are all remapped now
   mod->dynsym = (void *)mod->dynsym - mod->load_base + mod->load_virtbase;
   mod->dynstrtab = (void *)mod->dynstrtab - mod->load_base + mod->load_virtbase;
-  mod->hashtab = (void *)mod->hashtab - mod->load_base + mod->load_virtbase;
+  if (mod->hashtab)
+    mod->hashtab = (void *)mod->hashtab - mod->load_base + mod->load_virtbase;
 
   mod->flags |= MOD_MAPPED;
 
